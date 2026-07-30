@@ -403,7 +403,7 @@ public class TheLedgerPlugin extends Plugin
 			long ts = System.currentTimeMillis();
 			SessionHeader header = sessionManager.start(accountHash, worldTypeString(), ts, tick);
 			writer = new JsonlEventWriter(sessionManager.getSessionFile(), header,
-				Math.max(16, config.queueCapacity()));
+				JsonlEventWriter.DEFAULT_QUEUE_CAPACITY);
 			resolver = new MovementResolver(header.getSessionId(),
 				Math.max(0, config.deathWindowTicks()),
 				Math.max(0, config.actionContextTicks()));

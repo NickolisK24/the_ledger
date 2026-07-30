@@ -37,12 +37,15 @@ public final class JsonlEventReader
 		private final SessionHeader header;
 		private final List<LedgerEvent> events;
 		private final int malformedLines;
+		private final int malformedBodyLines;
 
-		ReplaySession(SessionHeader header, List<LedgerEvent> events, int malformedLines)
+		ReplaySession(SessionHeader header, List<LedgerEvent> events, int malformedLines,
+					  int malformedBodyLines)
 		{
 			this.header = header;
 			this.events = Collections.unmodifiableList(events);
 			this.malformedLines = malformedLines;
+			this.malformedBodyLines = malformedBodyLines;
 		}
 
 		/**
@@ -61,9 +64,25 @@ public final class JsonlEventReader
 			return events;
 		}
 
+		/**
+		 * Every line that could not be read, wherever it sat in the file.
+		 */
 		public int getMalformedLines()
 		{
 			return malformedLines;
+		}
+
+		/**
+		 * Unreadable lines that had readable lines after them, so their position is inside the
+		 * body rather than at the end.
+		 * <p>
+		 * The distinction is the whole point: a half-written line at the end of a file is the
+		 * normal signature of a client being killed, whereas the same damage in the middle means
+		 * a hole opened up and the stream carried on around it.
+		 */
+		public int getMalformedBodyLines()
+		{
+			return malformedBodyLines;
 		}
 
 		/**
@@ -73,6 +92,24 @@ public final class JsonlEventReader
 		public boolean hasSessionEnd()
 		{
 			return findSessionEnd() != null;
+		}
+
+		/**
+		 * The session was cut off: no SESSION_END was ever written.
+		 * <p>
+		 * Deliberately separate from {@link #isCompromised()}, because these are different
+		 * failures needing different remediation and collapsing them would throw away a large
+		 * share of real data. Crashing out of this game is routine — alt-F4, the machine sleeping,
+		 * the connection dropping — and none of that damages what was already flushed.
+		 * <p>
+		 * What is missing is a <b>tail of unknown length</b> at the end: whatever was still queued
+		 * when the process died, plus possibly a half-written final line. The body before it is
+		 * intact and safe to compute over. A consumer should discard only the final window, never
+		 * the session.
+		 */
+		public boolean isTruncated()
+		{
+			return !hasSessionEnd();
 		}
 
 		/**
@@ -88,15 +125,22 @@ public final class JsonlEventReader
 		}
 
 		/**
-		 * True when this file is known to have holes in it.
+		 * True when this file is known to have holes <b>inside its body</b>, of unknown position
+		 * and unknown size.
 		 * <p>
-		 * A consumer computing rates, kill counts or dry streaks should exclude a compromised
-		 * session rather than compute over it — a missing kill is indistinguishable from a kill
-		 * that did not happen, and quietly deflates every figure derived from it.
+		 * A consumer computing rates, kill counts or dry streaks must exclude a compromised
+		 * session entirely rather than compute over it — a missing kill is indistinguishable from
+		 * a kill that did not happen, so a hole does not add noise, it biases every figure
+		 * downward, and nothing in the file says by how much.
+		 * <p>
+		 * Contrast {@link #isTruncated()}, where the damage is a tail of known position and the
+		 * body is trustworthy.
 		 */
 		public boolean isCompromised()
 		{
-			if (malformedLines > 0)
+			// Body lines only. A malformed line at the very end is truncation, which is reported
+			// by isTruncated() and does not condemn the body.
+			if (malformedBodyLines > 0)
 			{
 				return true;
 			}
@@ -133,6 +177,10 @@ public final class JsonlEventReader
 		SessionHeader header = null;
 		List<LedgerEvent> events = new ArrayList<>();
 		int malformed = 0;
+		int malformedBody = 0;
+		// Malformed lines with nothing readable yet after them. If the file ends here they were
+		// trailing damage — a killed process — rather than a hole the stream carried on around.
+		int pendingMalformed = 0;
 
 		try (BufferedReader in = new BufferedReader(new InputStreamReader(
 			new FileInputStream(file), StandardCharsets.UTF_8)))
@@ -161,13 +209,17 @@ public final class JsonlEventReader
 				if (event == null)
 				{
 					malformed++;
+					pendingMalformed++;
 					continue;
 				}
 				events.add(event);
+				// Something readable followed, so any damage before it was interior.
+				malformedBody += pendingMalformed;
+				pendingMalformed = 0;
 			}
 		}
 
-		return new ReplaySession(header, events, malformed);
+		return new ReplaySession(header, events, malformed, malformedBody);
 	}
 
 	/**

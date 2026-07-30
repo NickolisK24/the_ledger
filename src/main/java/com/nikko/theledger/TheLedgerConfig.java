@@ -1,7 +1,6 @@
 package com.nikko.theledger;
 
 import com.nikko.theledger.capture.MovementResolver;
-import com.nikko.theledger.store.JsonlEventWriter;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
@@ -78,15 +77,8 @@ public interface TheLedgerConfig extends Config
 		return 2;
 	}
 
-	@ConfigItem(
-		position = 6,
-		keyName = "queueCapacity",
-		name = "Write queue capacity",
-		description = "Maximum events held in memory awaiting a flush. Overflow is dropped and "
-			+ "counted in the debug panel rather than blocking the client."
-	)
-	default int queueCapacity()
-	{
-		return JsonlEventWriter.DEFAULT_QUEUE_CAPACITY;
-	}
+	// The write queue capacity is deliberately NOT exposed here. It is a constant on
+	// JsonlEventWriter, sized so overflow never happens in normal operation. A user who set it
+	// low would generate routine DATA_LOSS markers, and that trains everyone to ignore the one
+	// signal in the log that must never become noise.
 }

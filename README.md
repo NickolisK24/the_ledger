@@ -92,18 +92,40 @@ for a consumer to infer:
   tick the loss began on and placed immediately after the last event that *was* recorded. The
   running total lands on `SESSION_END` as `droppedEvents`.
 
-`JsonlEventReader.ReplaySession` surfaces this directly: `hasSessionEnd()`, `getDroppedEvents()`
-(null when the session never ended cleanly, so an unknown total is never mistaken for zero) and
-`isCompromised()`.
+A third failure needs naming and is deliberately *not* one of the above: the client can simply
+be killed. Nothing is written badly, but everything still queued is gone and no `SESSION_END`
+ever lands.
 
-**Anything computing rates, kill counts or dry streaks must exclude a compromised session
-rather than compute over it.** A missing kill is indistinguishable from a kill that did not
-happen, so a hole does not add noise — it quietly deflates every figure derived from it. A
-counter in a debug panel cannot help here, because whatever reads the file later never sees it.
+`JsonlEventReader.ReplaySession` reports these as two distinct predicates, because they are
+different failures with different remediation:
+
+| | `isCompromised()` | `isTruncated()` |
+| --- | --- | --- |
+| **What is wrong** | Holes *inside* the body | A *tail* is missing |
+| **Position** | Unknown | Known: the end of the file |
+| **Size** | Unknown | Unknown |
+| **Cause** | Queue overflow, disk failure, damage mid-file | No `SESSION_END`: alt-F4, sleep, connection drop, crash |
+| **Body trustworthy** | No | Yes |
+| **A consumer must** | **Exclude the whole session** | **Discard only the final window — never the session** |
+
+**Do not collapse these.** Crashing out of this game is routine, so treating a missing
+`SESSION_END` as corruption would discard a large share of perfectly good data. Equally, a hole
+of unknown position inside the body cannot be worked around: a missing kill is
+indistinguishable from a kill that did not happen, so a hole does not add noise — it biases
+every figure downward, and nothing in the file says by how much.
+
+Note that a half-written final line is *truncation*, not corruption. `getMalformedLines()`
+counts every unreadable line; `getMalformedBodyLines()` counts only those with readable lines
+after them, and it is the body count that feeds `isCompromised()`.
+
+`getDroppedEvents()` returns null rather than zero when there is no `SESSION_END`, so an unknown
+total is never mistaken for a clean one.
 
 Dropping is backpressure of last resort. The write queue holds 65,536 events, roughly twenty
 minutes of sustained heavy activity with the writer completely stalled, so it should never be
-reached in normal operation.
+reached in normal operation. **Its capacity is a constant and is deliberately not exposed as a
+config item** — a user who set it low would generate routine `DATA_LOSS` markers, and that
+trains everyone to ignore the one signal in the log that must never become noise.
 
 ### Privacy
 
@@ -246,3 +268,7 @@ Plus: a death produces exactly one `PLAYER_DEATH` and only `DEATH_LOSS` events, 
 `UNCLASSIFIED_LOSS`; a truncated final JSONL line is skipped with every preceding event still
 loading; and a queue overflow emits exactly one `DATA_LOSS` marker no matter how many events
 are lost, with the total surviving a write/read round trip on `SESSION_END`.
+
+Integrity signals are pinned in all four combinations: a crashed session is truncated but not
+compromised, a session with drops and no `SESSION_END` is both, damage inside the body is
+compromised but not truncated, and a clean session is neither.

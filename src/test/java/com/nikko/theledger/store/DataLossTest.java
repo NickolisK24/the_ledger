@@ -6,6 +6,9 @@ import com.nikko.theledger.model.MovementCategory;
 import com.nikko.theledger.model.SessionHeader;
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
 import java.util.Collections;
 import java.util.List;
 import org.junit.Rule;
@@ -199,6 +202,126 @@ public class DataLossTest
 		assertFalse(replay.hasSessionEnd());
 		assertNull(replay.getDroppedEvents());
 		assertFalse(replay.isCompromised());
+	}
+
+	// ---- Truncation and corruption are different failures ----
+
+	/**
+	 * Crashing out is routine in this game: alt-F4, the machine sleeping, the connection
+	 * dropping. None of it damages what was already flushed. Such a session is truncated — an
+	 * unknown-length tail is gone — but its body is intact, and folding this into
+	 * isCompromised() would throw away a large share of perfectly good data.
+	 */
+	@Test
+	public void crashedSessionIsTruncatedButNotCompromised() throws IOException
+	{
+		File file = new File(tmp.getRoot(), "hard-crash.jsonl");
+		JsonlEventWriter writer = new JsonlEventWriter(file, header(), 4096);
+		for (int i = 0; i < 30; i++)
+		{
+			writer.enqueue(movement(i));
+		}
+		writer.drain();
+		// Process killed here. No close, no SESSION_END, and the last line went out half-written.
+		Files.write(file.toPath(),
+			JsonlEventWriter.serialize(movement(30)).substring(0, 35).getBytes(StandardCharsets.UTF_8),
+			StandardOpenOption.APPEND);
+
+		JsonlEventReader.ReplaySession replay = JsonlEventReader.read(file);
+
+		assertTrue("no SESSION_END means the tail is gone", replay.isTruncated());
+		assertFalse("the body is intact and safe to compute over", replay.isCompromised());
+		assertEquals(30, replay.getEvents().size());
+		// The damage is at the end, so it is truncation rather than a hole in the body.
+		assertEquals(1, replay.getMalformedLines());
+		assertEquals(0, replay.getMalformedBodyLines());
+	}
+
+	@Test
+	public void sessionWithDropsAndNoSessionEndIsBoth() throws IOException
+	{
+		File file = new File(tmp.getRoot(), "both.jsonl");
+		JsonlEventWriter writer = new JsonlEventWriter(file, header(), 8);
+		for (int i = 0; i < 500; i++)
+		{
+			writer.enqueue(movement(i));
+		}
+		writer.drain();
+		// Killed before shutDown could write SESSION_END.
+
+		JsonlEventReader.ReplaySession replay = JsonlEventReader.read(file);
+
+		assertTrue(replay.isTruncated());
+		assertTrue("a DATA_LOSS marker condemns the body regardless of the missing tail",
+			replay.isCompromised());
+		assertEquals(1, ofType(replay.getEvents(), EventType.DATA_LOSS).size());
+		assertNull("no SESSION_END, so the total was never recorded", replay.getDroppedEvents());
+	}
+
+	@Test
+	public void cleanSessionIsNeitherTruncatedNorCompromised() throws IOException
+	{
+		File file = new File(tmp.getRoot(), "neither.jsonl");
+		try (JsonlEventWriter writer = new JsonlEventWriter(file, header(), 4096))
+		{
+			for (int i = 0; i < 40; i++)
+			{
+				writer.enqueue(movement(i));
+			}
+			writer.enqueue(LedgerEvent.builder()
+				.schemaVersion(LedgerEvent.SCHEMA_VERSION)
+				.sessionId(SESSION)
+				.ts(1_700_000_001_000L)
+				.tick(500)
+				.type(EventType.SESSION_END)
+				.droppedEvents(0)
+				.actionContext("shutDown")
+				.build());
+		}
+
+		JsonlEventReader.ReplaySession replay = JsonlEventReader.read(file);
+
+		assertFalse(replay.isTruncated());
+		assertFalse(replay.isCompromised());
+		assertEquals(Integer.valueOf(0), replay.getDroppedEvents());
+	}
+
+	/**
+	 * Damage in the middle is not truncation. The stream carried on around a hole of unknown
+	 * size, which is exactly the case a consumer must refuse to compute over.
+	 */
+	@Test
+	public void corruptionInsideTheBodyIsCompromisedButNotTruncated() throws IOException
+	{
+		File file = new File(tmp.getRoot(), "interior.jsonl");
+		try (JsonlEventWriter writer = new JsonlEventWriter(file, header(), 4096))
+		{
+			for (int i = 0; i < 10; i++)
+			{
+				writer.enqueue(movement(i));
+			}
+			writer.enqueue(LedgerEvent.builder()
+				.schemaVersion(LedgerEvent.SCHEMA_VERSION)
+				.sessionId(SESSION)
+				.ts(1_700_000_001_000L)
+				.tick(500)
+				.type(EventType.SESSION_END)
+				.droppedEvents(0)
+				.actionContext("shutDown")
+				.build());
+		}
+
+		List<String> lines = new java.util.ArrayList<>(
+			Files.readAllLines(file.toPath(), StandardCharsets.UTF_8));
+		lines.add(6, "{\"schemaVersion\":1,\"sessionId\":\"x\",\"ts\":1,\"tick\":2,\"type\":\"ITEM");
+		Files.write(file.toPath(), String.join("\n", lines).concat("\n").getBytes(StandardCharsets.UTF_8));
+
+		JsonlEventReader.ReplaySession replay = JsonlEventReader.read(file);
+
+		assertFalse("SESSION_END is present, so nothing is missing from the end",
+			replay.isTruncated());
+		assertTrue(replay.isCompromised());
+		assertEquals(1, replay.getMalformedBodyLines());
 	}
 
 	@Test
