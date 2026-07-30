@@ -118,6 +118,22 @@ Note that a half-written final line is *truncation*, not corruption. `getMalform
 counts every unreadable line; `getMalformedBodyLines()` counts only those with readable lines
 after them, and it is the body count that feeds `isCompromised()`.
 
+**The boundary of that rule.** Classifying damage by position assumes that only the *final*
+write can be partial. That holds for this output — a single writer, append-only, one flush per
+batch, each line written whole — but it is an assumption about the writer, not a guarantee the
+reader can check. Two consequences worth knowing before trusting the predicates:
+
+- Two or more adjacent malformed lines at the end of a file are all classified as truncation and
+  none as corruption. If something ever produced interleaved partial writes, a hole in the body
+  could hide in that tail and `isCompromised()` would not see it.
+- Damage that leaves a line *syntactically valid but semantically wrong* — a plausible number in
+  place of another — is invisible to both predicates. There is no checksum per line, and Phase 1
+  does not add one.
+
+So `isCompromised() == false` means "no detectable hole", not "provably intact". If a future
+phase needs a stronger guarantee than that, the place to add it is a per-line or per-batch
+checksum, and it would be a schema change.
+
 `getDroppedEvents()` returns null rather than zero when there is no `SESSION_END`, so an unknown
 total is never mistaken for a clean one.
 
@@ -244,6 +260,22 @@ Requires a JDK (11 or newer) and network access to `https://repo.runelite.net`, 
 No third-party dependencies are declared beyond what `runelite-client` already provides:
 Lombok, JUnit 4, and Gson used through its streaming API. There is no reflection, no JNI, no
 subprocess execution, and nothing is downloaded at runtime.
+
+### Commit signing
+
+`commit.gpgsign` is set to **false** in this repository's local config, deliberately. It
+overrides whatever is set globally on the machine, so commits here are unsigned rather than
+signed by whichever key happens to be configured — a key that is not the repository owner's
+would attribute the work to someone else and show as Unverified on GitHub.
+
+If you want signed commits, enable it locally *with your own key*:
+
+```
+git config --local user.signingkey <your key>
+git config --local commit.gpgsign true
+```
+
+Do not simply flip `commit.gpgsign` back on and inherit a global `user.signingkey`.
 
 ### Tests
 
