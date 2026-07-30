@@ -182,9 +182,10 @@ public class JsonlRoundTripTest
 		assertEquals(84, writer.getDroppedCount());
 		assertEquals(16, writer.getQueueDepth());
 
-		assertEquals(16, writer.drain());
+		// 16 survivors plus the DATA_LOSS marker that records the other 84.
+		assertEquals(17, writer.drain());
 		assertEquals(0, writer.getQueueDepth());
-		assertEquals(16, writer.getWrittenCount());
+		assertEquals(17, writer.getWrittenCount());
 		writer.close();
 	}
 

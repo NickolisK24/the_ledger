@@ -16,13 +16,10 @@ import com.nikko.theledger.store.SessionManager;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -33,6 +30,7 @@ import net.runelite.api.GameState;
 import net.runelite.api.Item;
 import net.runelite.api.ItemComposition;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.MenuAction;
 import net.runelite.api.WorldType;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.GameStateChanged;
@@ -88,12 +86,20 @@ public class TheLedgerPlugin extends Plugin
 	);
 
 	/**
-	 * Menu options that say nothing about where items went. Kept out of the action context so
+	 * Interactions that say nothing about where items went. Kept out of the action context so
 	 * they cannot displace a click whose effect has not landed yet.
+	 * <p>
+	 * Matched on {@link MenuAction} rather than the option label: labels are display strings and
+	 * shift between game revisions, whereas these enum constants are stable.
 	 */
-	private static final Set<String> NON_INFORMATIVE_OPTIONS = new HashSet<>(Arrays.asList(
-		"Cancel", "Walk here", "Examine", "Continue", "Look at", "Face here"
-	));
+	private static final EnumSet<MenuAction> NON_INFORMATIVE_ACTIONS = EnumSet.of(
+		MenuAction.CANCEL,
+		MenuAction.WALK,
+		MenuAction.EXAMINE_ITEM,
+		MenuAction.EXAMINE_ITEM_GROUND,
+		MenuAction.EXAMINE_NPC,
+		MenuAction.EXAMINE_OBJECT
+	);
 
 	@Inject
 	private Client client;
@@ -308,11 +314,10 @@ public class TheLedgerPlugin extends Plugin
 	@Subscribe
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
-		// This fires for every left click, including the implicit "Cancel" on a click that does
+		// This fires for every left click, including the implicit CANCEL on a click that does
 		// nothing. Letting those overwrite the context would discard a deposit or a Grand Exchange
 		// confirmation in the tick or two before the client applies it.
-		String option = event.getMenuOption();
-		if (NON_INFORMATIVE_OPTIONS.contains(option))
+		if (NON_INFORMATIVE_ACTIONS.contains(event.getMenuAction()))
 		{
 			return;
 		}
@@ -426,12 +431,17 @@ public class TheLedgerPlugin extends Plugin
 		if (resolver != null && writer != null)
 		{
 			// SESSION_END is best effort. Its absence in a file is how a crash is recognised.
+			// It carries the drop total so a consumer can exclude a compromised session instead
+			// of computing rates over a hole it cannot see. Drops during the final drain that
+			// follows are not in this figure; the DATA_LOSS marker still records that they
+			// happened.
 			writer.enqueue(LedgerEvent.builder()
 				.schemaVersion(LedgerEvent.SCHEMA_VERSION)
 				.sessionId(sessionManager.getSessionId())
 				.ts(System.currentTimeMillis())
 				.tick(client.getTickCount())
 				.type(EventType.SESSION_END)
+				.droppedEvents(writer.getDroppedCount())
 				.actionContext(reason)
 				.build());
 		}

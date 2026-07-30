@@ -42,12 +42,13 @@ Fields, in the order they always appear:
 | `sessionId` | UUID for this session. |
 | `ts` | Epoch milliseconds. |
 | `tick` | Client tick the event was resolved on. |
-| `type` | `SESSION_START`, `SESSION_END`, `ITEM_MOVEMENT`, `XP_GAIN`, `PLAYER_DEATH`, `STATE_RESET`. |
+| `type` | `SESSION_START`, `SESSION_END`, `ITEM_MOVEMENT`, `XP_GAIN`, `PLAYER_DEATH`, `STATE_RESET`, `DATA_LOSS`. |
 | `category` | Economic classification of a movement. Absent on everything else. |
 | `containerId` | 93 inventory, 94 equipment, 95 bank. Absent when not container-scoped. |
 | `itemId` | Canonical item id: notes collapsed, placeholders excluded. |
 | `qty` | Signed. Positive is an increase in that container. |
 | `skill` / `xpDelta` | Set on `XP_GAIN` only. |
+| `droppedEvents` | Set on `SESSION_END` only. Total events the writer could not persist. |
 | `actionContext` | Short description of the menu interaction that explains the movement. |
 | `flags` | Audit flags. Always present, possibly empty. |
 
@@ -78,6 +79,31 @@ rather than observed can always be found again:
 - `UNKNOWN_BANK_BASELINE` — the transfer was inferred while the bank interface had not been
   opened this session, so the other leg could not be confirmed.
 - `DEATH_WINDOW` — resolved inside the window opened by a death.
+
+### The log is self-describing about its own gaps
+
+Two things can put a hole in a session, and both are written into the stream rather than left
+for a consumer to infer:
+
+- **`STATE_RESET`** — every container baseline was invalidated. Nothing before that line can be
+  diffed against anything after it.
+- **`DATA_LOSS`** — events were produced but not written, because the write queue filled or the
+  disk failed. Exactly one marker is emitted per session, on the first drop, stamped with the
+  tick the loss began on and placed immediately after the last event that *was* recorded. The
+  running total lands on `SESSION_END` as `droppedEvents`.
+
+`JsonlEventReader.ReplaySession` surfaces this directly: `hasSessionEnd()`, `getDroppedEvents()`
+(null when the session never ended cleanly, so an unknown total is never mistaken for zero) and
+`isCompromised()`.
+
+**Anything computing rates, kill counts or dry streaks must exclude a compromised session
+rather than compute over it.** A missing kill is indistinguishable from a kill that did not
+happen, so a hole does not add noise — it quietly deflates every figure derived from it. A
+counter in a debug panel cannot help here, because whatever reads the file later never sees it.
+
+Dropping is backpressure of last resort. The write queue holds 65,536 events, roughly twenty
+minutes of sustained heavy activity with the writer completely stalled, so it should never be
+reached in normal operation.
 
 ### Privacy
 
@@ -148,6 +174,15 @@ Drinking a dose replaces a 4-dose potion with a 3-dose one, which are different 
 they are the same item partially consumed. Recognising dose and charge ladders is what
 `CONSUMABLE` and `CHARGE` are reserved for.
 
+**Note for Phase 2.** When that lands, a dose decrement must be costed as the **marginal
+difference between the two ladder rungs**, not the full value of the rung that was consumed.
+Drinking one dose of a four-dose potion costs roughly a quarter of the potion, not all of it;
+charging the full rung would overstate consumable expense by a factor of four and make every
+GP/hr figure for potion-heavy content wrong. The Phase 1 test
+`potionDoseConsumedIsALossOfTheFourDoseAndAGainOfTheThreeDose` records both sides of the
+movement precisely so that the marginal calculation is possible later — the gain of the 3-dose
+item is not noise to be suppressed, it is the other half of the arithmetic.
+
 ### State transitions swallow the movements inside them
 
 Invalidating every baseline on `LOADING` means the first real change after a teleport or region
@@ -208,5 +243,6 @@ following must produce **zero** gain or loss events:
 - Place a buy offer, place a sell offer, abort an offer, collect an offer, collect to bank
 
 Plus: a death produces exactly one `PLAYER_DEATH` and only `DEATH_LOSS` events, never
-`UNCLASSIFIED_LOSS`; and a truncated final JSONL line is skipped with every preceding event
-still loading.
+`UNCLASSIFIED_LOSS`; a truncated final JSONL line is skipped with every preceding event still
+loading; and a queue overflow emits exactly one `DATA_LOSS` marker no matter how many events
+are lost, with the total surviving a write/read round trip on `SESSION_END`.

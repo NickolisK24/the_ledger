@@ -71,6 +71,12 @@ public class LedgerEvent
 	Integer qty;
 	String skill;
 	Integer xpDelta;
+	/**
+	 * Total events lost this session. Set on SESSION_END only, so a consumer can detect a
+	 * compromised session and exclude it rather than computing over a hole. Null everywhere
+	 * else, and therefore absent from every other line.
+	 */
+	Integer droppedEvents;
 	String actionContext;
 	@Builder.Default
 	List<String> flags = Collections.emptyList();

@@ -37,7 +37,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class JsonlEventWriter implements Closeable
 {
-	public static final int DEFAULT_QUEUE_CAPACITY = 4096;
+	/**
+	 * Sized so the queue is never reached in practice rather than merely usually.
+	 * <p>
+	 * A busy tick produces tens of events and the drain runs every couple of seconds, so
+	 * steady-state depth is double figures. This capacity absorbs roughly twenty minutes of
+	 * sustained heavy activity with the writer completely stalled — a disk hang, an antivirus
+	 * scan — and costs about 11 MB only in the case where it actually fills. Dropping is
+	 * backpressure of last resort, not a routine occurrence.
+	 */
+	public static final int DEFAULT_QUEUE_CAPACITY = 65536;
 
 	private final File file;
 	private final SessionHeader header;
@@ -56,6 +65,16 @@ public final class JsonlEventWriter implements Closeable
 	private BufferedWriter out;
 	private boolean closed;
 
+	/**
+	 * Built on the first drop and held outside the queue, because the queue being full is
+	 * precisely the situation in which it is created — enqueueing it would drop it too.
+	 */
+	private volatile LedgerEvent dataLossMarker;
+	/**
+	 * Guarded by {@link #writeLock}. Guarantees the marker reaches the file exactly once.
+	 */
+	private boolean dataLossWritten;
+
 	public JsonlEventWriter(File file, SessionHeader header)
 	{
 		this(file, header, DEFAULT_QUEUE_CAPACITY);
@@ -65,7 +84,9 @@ public final class JsonlEventWriter implements Closeable
 	{
 		this.file = file;
 		this.header = header;
-		this.queue = new ArrayBlockingQueue<>(Math.max(16, queueCapacity));
+		// Only guards against a non-positive capacity. The production floor is applied by the
+		// plugin, so the writer stays a general-purpose component that can be driven at any size.
+		this.queue = new ArrayBlockingQueue<>(Math.max(1, queueCapacity));
 	}
 
 	/**
@@ -83,8 +104,36 @@ public final class JsonlEventWriter implements Closeable
 		{
 			return true;
 		}
-		dropped.incrementAndGet();
+		noteDrop(event);
 		return false;
+	}
+
+	/**
+	 * Records that data was lost and, the first time it happens, prepares the marker that says
+	 * so inside the file.
+	 *
+	 * @param cause the event that could not be written, used only for its timestamp and tick so
+	 *              the marker lands at the right point in the timeline.
+	 */
+	private void noteDrop(LedgerEvent cause)
+	{
+		dropped.incrementAndGet();
+		if (dataLossMarker == null)
+		{
+			dataLossMarker = buildDataLossMarker(cause);
+		}
+	}
+
+	private LedgerEvent buildDataLossMarker(LedgerEvent cause)
+	{
+		return LedgerEvent.builder()
+			.schemaVersion(LedgerEvent.SCHEMA_VERSION)
+			.sessionId(header == null ? null : header.getSessionId())
+			.ts(cause == null ? System.currentTimeMillis() : cause.getTs())
+			.tick(cause == null ? 0 : cause.getTick())
+			.type(EventType.DATA_LOSS)
+			.actionContext("write queue full or unwritable")
+			.build();
 	}
 
 	/**
@@ -97,13 +146,14 @@ public final class JsonlEventWriter implements Closeable
 	{
 		List<LedgerEvent> batch = new ArrayList<>(queue.size());
 		queue.drainTo(batch);
-		if (batch.isEmpty())
-		{
-			return 0;
-		}
 
 		synchronized (writeLock)
 		{
+			LedgerEvent marker = dataLossWritten ? null : dataLossMarker;
+			if (batch.isEmpty() && marker == null)
+			{
+				return 0;
+			}
 			if (closed)
 			{
 				dropped.addAndGet(batch.size());
@@ -112,20 +162,41 @@ public final class JsonlEventWriter implements Closeable
 			try
 			{
 				ensureOpen();
+				int lines = 0;
 				for (LedgerEvent event : batch)
 				{
 					out.write(serialize(event));
 					out.write('\n');
+					lines++;
+				}
+				// The marker goes in after this batch, not before it. Everything still queued when
+				// the overflow happened was accepted before it, so the gap begins on the far side
+				// of them — putting the marker first would claim events that were recorded
+				// successfully fell inside the hole.
+				if (marker != null)
+				{
+					out.write(serialize(marker));
+					out.write('\n');
+					dataLossWritten = true;
+					lines++;
 				}
 				out.flush();
-				written.addAndGet(batch.size());
-				return batch.size();
+				written.addAndGet(lines);
+				return lines;
 			}
 			catch (IOException e)
 			{
 				errors.incrementAndGet();
 				lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
-				dropped.addAndGet(batch.size());
+				// A failed write loses the batch just as surely as a full queue does.
+				if (!batch.isEmpty())
+				{
+					dropped.addAndGet(batch.size());
+					if (dataLossMarker == null)
+					{
+						dataLossMarker = buildDataLossMarker(batch.get(0));
+					}
+				}
 				return 0;
 			}
 		}
@@ -281,6 +352,10 @@ public final class JsonlEventWriter implements Closeable
 			if (event.getXpDelta() != null)
 			{
 				w.name("xpDelta").value(event.getXpDelta());
+			}
+			if (event.getDroppedEvents() != null)
+			{
+				w.name("droppedEvents").value(event.getDroppedEvents());
 			}
 			if (event.getActionContext() != null)
 			{

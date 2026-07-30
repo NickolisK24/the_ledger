@@ -65,6 +65,67 @@ public final class JsonlEventReader
 		{
 			return malformedLines;
 		}
+
+		/**
+		 * False when the file has no SESSION_END, which means the client died without warning.
+		 * The tail of such a file is whatever had been flushed.
+		 */
+		public boolean hasSessionEnd()
+		{
+			return findSessionEnd() != null;
+		}
+
+		/**
+		 * Total events the writer could not persist, as recorded on SESSION_END.
+		 *
+		 * @return the count, or null when the session never ended cleanly and the true total is
+		 * therefore unknown.
+		 */
+		public Integer getDroppedEvents()
+		{
+			LedgerEvent end = findSessionEnd();
+			return end == null ? null : end.getDroppedEvents();
+		}
+
+		/**
+		 * True when this file is known to have holes in it.
+		 * <p>
+		 * A consumer computing rates, kill counts or dry streaks should exclude a compromised
+		 * session rather than compute over it — a missing kill is indistinguishable from a kill
+		 * that did not happen, and quietly deflates every figure derived from it.
+		 */
+		public boolean isCompromised()
+		{
+			if (malformedLines > 0)
+			{
+				return true;
+			}
+			Integer droppedEvents = getDroppedEvents();
+			if (droppedEvents != null && droppedEvents > 0)
+			{
+				return true;
+			}
+			for (LedgerEvent e : events)
+			{
+				if (e.getType() == EventType.DATA_LOSS)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		private LedgerEvent findSessionEnd()
+		{
+			for (int i = events.size() - 1; i >= 0; i--)
+			{
+				if (events.get(i).getType() == EventType.SESSION_END)
+				{
+					return events.get(i);
+				}
+			}
+			return null;
+		}
 	}
 
 	public static ReplaySession read(File file) throws IOException
@@ -190,6 +251,10 @@ public final class JsonlEventReader
 			if (o.has("xpDelta"))
 			{
 				b.xpDelta(o.get("xpDelta").getAsInt());
+			}
+			if (o.has("droppedEvents"))
+			{
+				b.droppedEvents(o.get("droppedEvents").getAsInt());
 			}
 			String actionContext = asString(o, "actionContext");
 			if (actionContext != null)
