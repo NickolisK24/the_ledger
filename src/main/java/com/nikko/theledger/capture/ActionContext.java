@@ -10,6 +10,23 @@ package com.nikko.theledger.capture;
  * With no context both look exactly like destroying the items, and a ten million coin buy
  * offer becomes a catastrophic phantom loss.
  * <p>
+ * <b>Classification reads structure, never display text.</b> Only {@link #getWidgetGroupId()} —
+ * the interface the click landed on — decides anything. {@code menuOption} and {@code menuTarget}
+ * are carried for the audit trail and are written into the event's {@code actionContext} field,
+ * but nothing branches on them. A "Deposit" prefix used to be a fallback for identifying an
+ * invisible destination, and it was wrong in both directions at once: it is a localised,
+ * revision-sensitive label, so a translated client silently loses the inference, while a
+ * "Deposit" on some surface that is not a bank at all — a minigame hopper, a storage the spine
+ * does not model — was promoted to a confident bank transfer it had no evidence for. Where the
+ * structure is unknown the movement stays an auditable unclassified one. Unknown must not become
+ * a known deposit through prose.
+ * <p>
+ * The context also outlives the click by design, for a tick or two, because the client applies a
+ * deposit or a Grand Exchange confirmation after the click that caused it. That means an
+ * unrelated movement can be <i>labelled</i> with a stale context. It is a label and nothing more:
+ * see {@link MovementResolver#resolveTick}, which pairs movement legs by canonical item identity
+ * and never by context.
+ * <p>
  * Immutable, and free of client types so the fixtures can construct one directly. The plugin
  * layer builds it from {@code MenuOptionClicked}; {@code widgetGroupId} is the top half of
  * {@code getParam1()}.
@@ -92,12 +109,29 @@ public final class ActionContext
 		return this == EMPTY || tick == Integer.MIN_VALUE;
 	}
 
+	/**
+	 * The two surfaces where the bank container itself reports the movement.
+	 * <p>
+	 * {@code BANKMAIN} is the bank window, {@code BANKSIDE} the inventory panel beside it, and an
+	 * item click while banking carries whichever of the two it was rendered in. Both legs of the
+	 * movement are observable on these surfaces, so nothing has to be inferred and this method
+	 * exists to say so rather than to drive a classification.
+	 */
 	public boolean isBankInterface()
 	{
 		return widgetGroupId == LedgerContainers.IFACE_BANKMAIN
 			|| widgetGroupId == LedgerContainers.IFACE_BANKSIDE;
 	}
 
+	/**
+	 * The deposit box: the one verified surface that moves items into the bank without the bank
+	 * container reporting anything.
+	 * <p>
+	 * Group identity is the whole test. No component id is consulted, because the group is already
+	 * unique to this surface — every widget inside a deposit box, the inventory it renders
+	 * included, is packed under group 192, which is what a live session's {@code @192} action
+	 * contexts showed for deposited soul runes, law runes and a medallion.
+	 */
 	public boolean isDepositBoxInterface()
 	{
 		return widgetGroupId == LedgerContainers.IFACE_BANK_DEPOSITBOX;
@@ -112,37 +146,11 @@ public final class ActionContext
 	}
 
 	/**
-	 * A deposit whose destination container will not update.
-	 * <p>
-	 * The deposit box interface is the certain case. A "Deposit" option anywhere that is not
-	 * the bank is also treated as one, because with the bank open both legs appear and net
-	 * out on their own — so reaching this method at all means the destination is invisible.
-	 */
-	public boolean looksLikeDeposit()
-	{
-		if (isDepositBoxInterface())
-		{
-			return true;
-		}
-		if (isBankInterface())
-		{
-			return false;
-		}
-		return startsWithIgnoreCase(menuOption, "deposit");
-	}
-
-	/**
 	 * A Grand Exchange interaction: offer placement, offer abort, or a collection.
 	 */
 	public boolean looksLikeGrandExchange()
 	{
 		return isGrandExchangeInterface();
-	}
-
-	private static boolean startsWithIgnoreCase(String s, String prefix)
-	{
-		return s.length() >= prefix.length()
-			&& s.substring(0, prefix.length()).equalsIgnoreCase(prefix);
 	}
 
 	/**

@@ -305,9 +305,38 @@ trackers go wrong. Five rules do the work:
 4. **Transfers net out symmetrically across every container touched in the tick.** Banking,
    equipping, unequipping and withdrawing as notes all reduce to this one rule. Both legs are
    still emitted, so the movement stays auditable — they just carry no economic weight.
-5. **Destinations that never update a container are inferred from the menu action** and always
-   flagged. The deposit box and the Grand Exchange are both invisible otherwise; unhandled, a
-   ten million coin buy offer logs as a catastrophic loss.
+5. **Destinations that never update a container are inferred from the interface the click landed
+   on** and always flagged. The deposit box and the Grand Exchange are both invisible otherwise;
+   unhandled, a ten million coin buy offer logs as a catastrophic loss.
+
+Rule 5 reads structure and never display text. The interface group ids it uses are verified
+against upstream `net.runelite.api.gameval.InterfaceID`: `BANKMAIN = 12`, `BANKSIDE = 15`,
+`BANK_DEPOSITBOX = 192`, `GE_VIEWONLY = 200`, `GE_COLLECT = 402`, `GE_OFFERS = 465`,
+`GE_OFFERS_SIDE = 467`. A live session independently showed `@192` on deposited soul runes, law
+runes and a medallion, classified as inferred deposit-box transfers.
+
+At a bank there is nothing to infer: `BANKMAIN` and `BANKSIDE` both report their side of the
+movement, so an ordinary deposit or withdrawal nets into a plain `TRANSFER` carrying no flags at
+all. The deposit box is the one verified surface that takes items into the bank while the bank
+container stays silent, and group 192 is the whole test — every widget inside a deposit box, the
+inventory it renders included, is packed under that group, so no component id is needed and none
+is consulted.
+
+**There is no display-string fallback.** A menu option beginning "Deposit", on any surface that
+was not a bank, used to be treated as an invisible deposit. That was wrong in both directions at
+once. A localised or renamed option silently loses the inference — the label is presentation, and
+presentation is not evidence. Worse, a "Deposit" on a surface that is not a bank at all was
+promoted to a confident bank transfer on no evidence, which does not merely mislabel the movement:
+it fabricates bank contents that were never there, and a later phase would price them. When the
+structure is unrecognised the movement stays an auditable `UNCLASSIFIED_LOSS`. Unknown must not
+become a known deposit through prose.
+
+The cost of that rule is stated rather than hidden: a deposit into storage the spine does not
+model — a seed vault, a group ironman shared bank, a deposit imp — now logs as an unflagged
+unclassified loss instead of an invented bank transfer. The items really did leave the inventory,
+so the direction is true and the movement is auditable; what is missing is the destination, which
+is exactly what the log now admits. Those surfaces are Phase 2 scope, and each one needs its
+group id confirmed against a real client before it earns an inference.
 
 Deaths are handled explicitly, and **as a lifecycle sequence rather than a duration**.
 

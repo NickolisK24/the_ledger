@@ -28,8 +28,9 @@ import java.util.TreeSet;
  *     deltas reach here notes have already been collapsed onto their unnoted id.</li>
  *     <li><b>Then the death window,</b> so a corpse-emptying wipe is never read as a deposit
  *     or an unexplained loss.</li>
- *     <li><b>Then invisible destinations,</b> inferred from the menu action and always
- *     flagged so the inference stays auditable.</li>
+ *     <li><b>Then invisible destinations,</b> identified by the interface the click landed on
+ *     and always flagged so the inference stays auditable. Structural evidence only: no rule
+ *     here reads a menu option, a target name or any other display string.</li>
  *     <li><b>Only then unclassified,</b> which in Phase 1 means "real, cause unknown".</li>
  * </ol>
  */
@@ -398,8 +399,10 @@ public final class MovementResolver
 									 ActionContext ctx, BaselineStatus seeded)
 	{
 		boolean bankBaselineKnown = seeded.isSeeded(LedgerContainers.BANK);
-		// Destinations that never update a container of their own. Always flagged.
-		if (LedgerContainers.isCarried(containerId) && ctx.looksLikeDeposit())
+		// Destinations that never update a container of their own. Always flagged, and identified
+		// by the interface the click landed on rather than by what the menu said - a deposit box is
+		// group 192 whatever language the client renders it in.
+		if (LedgerContainers.isCarried(containerId) && ctx.isDepositBoxInterface())
 		{
 			List<String> flags = new ArrayList<>(2);
 			flags.add(LedgerEvent.FLAG_INFERRED_DEPOSIT_BOX);
