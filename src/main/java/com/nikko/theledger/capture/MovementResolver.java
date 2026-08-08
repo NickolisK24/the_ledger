@@ -9,6 +9,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 /**
@@ -104,7 +105,35 @@ public final class MovementResolver
 	public List<LedgerEvent> resolveTick(int tick, long ts, List<ContainerDiffer.Delta> deltas,
 										 ActionContext context, BaselineStatus baselines)
 	{
-		BaselineStatus seeded = baselines == null ? NOTHING_SEEDED : baselines;
+		return resolveTick(tick, ts, deltas, Collections.emptyMap(), Collections.emptySet(),
+			context, baselines);
+	}
+
+	/**
+	 * Resolves one tick, including any container seen for the first time during it.
+	 *
+	 * @param firstObservations  containers that went from UNKNOWN to observed this tick. Their
+	 *                           contents can corroborate an opposite movement from another
+	 *                           container, and can do nothing else — see
+	 *                           {@link #reconcileAgainstFirstObservations}.
+	 * @param becameKnownThisTick containers whose baseline appeared at any point during this tick.
+	 *                           Treated as unseeded for confidence purposes, because a delta
+	 *                           captured while its counterpart was UNKNOWN does not become
+	 *                           trustworthy just because that counterpart turned up before the
+	 *                           tick resolved.
+	 */
+	public List<LedgerEvent> resolveTick(int tick, long ts, List<ContainerDiffer.Delta> deltas,
+										 Map<Integer, ContainerSnapshot> firstObservations,
+										 Set<Integer> becameKnownThisTick,
+										 ActionContext context, BaselineStatus baselines)
+	{
+		BaselineStatus supplied = baselines == null ? NOTHING_SEEDED : baselines;
+		Set<Integer> late = becameKnownThisTick == null ? Collections.emptySet() : becameKnownThisTick;
+		BaselineStatus seeded = containerId -> supplied.isSeeded(containerId) && !late.contains(containerId);
+		Map<Integer, ContainerSnapshot> observed =
+			firstObservations == null ? Collections.emptyMap() : firstObservations;
+		// Consumed as matches are made, so one first-observed item cannot corroborate two losses.
+		Map<Integer, Map<Integer, Integer>> available = availableFromFirstObservations(observed);
 		List<LedgerEvent> events = new ArrayList<>();
 		if (deltas == null || deltas.isEmpty())
 		{
@@ -193,6 +222,12 @@ public final class MovementResolver
 
 			events.addAll(transferLegs);
 
+			// Anything still unmatched may yet be corroborated by a container seen for the first
+			// time this tick. Only losses: a first observation cannot show that its own container
+			// gave anything up, because there was no baseline for it to have given it up from.
+			residualLosses = reconcileAgainstFirstObservations(tick, ts, itemId, residualLosses,
+				available, ctx, events);
+
 			for (int[] loss : residualLosses)
 			{
 				events.add(classifyLoss(tick, ts, loss[0], itemId, loss[1], ctx,
@@ -205,6 +240,97 @@ public final class MovementResolver
 		}
 
 		return events;
+	}
+
+	/**
+	 * Per container, per item, how much a first observation could corroborate.
+	 */
+	private static Map<Integer, Map<Integer, Integer>> availableFromFirstObservations(
+		Map<Integer, ContainerSnapshot> observed)
+	{
+		Map<Integer, Map<Integer, Integer>> available = new TreeMap<>();
+		for (Map.Entry<Integer, ContainerSnapshot> e : observed.entrySet())
+		{
+			if (e.getValue() != null && e.getValue().isKnown())
+			{
+				available.put(e.getKey(), new TreeMap<>(e.getValue().getQuantities()));
+			}
+		}
+		return available;
+	}
+
+	/**
+	 * Matches leftover losses against containers observed for the first time this tick.
+	 * <p>
+	 * The production case this exists for: equipment is empty at login, so the client never
+	 * allocates the container and it stays UNKNOWN. The first six graceful pieces go on, the
+	 * inventory reports losing three of them, and equipment reports its very first observation
+	 * already holding those three. Treating that observation as nothing but a baseline threw the
+	 * corroboration away and left three losses the player never took.
+	 * <p>
+	 * The rule is deliberately one-directional. A first observation may only <b>corroborate</b> a
+	 * loss someone else measured; it may never assert anything by itself. Whatever it holds that
+	 * nobody lost is simply baseline — the gear you were already wearing — and produces no event
+	 * at all. That is what keeps this from trading a phantom loss for a phantom gain.
+	 *
+	 * @param residualLosses losses left after ordinary same-tick netting
+	 * @param available      remaining corroborating quantity, consumed as matches are made
+	 * @param events         reconciled TRANSFER legs are appended here
+	 * @return the losses still unmatched
+	 */
+	private List<int[]> reconcileAgainstFirstObservations(int tick, long ts, int itemId,
+														  List<int[]> residualLosses,
+														  Map<Integer, Map<Integer, Integer>> available,
+														  ActionContext ctx, List<LedgerEvent> events)
+	{
+		if (residualLosses.isEmpty() || available.isEmpty())
+		{
+			return residualLosses;
+		}
+
+		List<int[]> stillUnmatched = new ArrayList<>(residualLosses.size());
+		for (int[] loss : residualLosses)
+		{
+			int losingContainer = loss[0];
+			int remaining = loss[1];
+
+			// Ascending container id, so the pairing is deterministic when more than one container
+			// was first observed in the same tick.
+			for (Map.Entry<Integer, Map<Integer, Integer>> entry : available.entrySet())
+			{
+				if (remaining <= 0)
+				{
+					break;
+				}
+				int observedContainer = entry.getKey();
+				if (observedContainer == losingContainer)
+				{
+					continue;
+				}
+				Integer pool = entry.getValue().get(itemId);
+				if (pool == null || pool <= 0)
+				{
+					continue;
+				}
+
+				int moved = Math.min(remaining, pool);
+				entry.getValue().put(itemId, pool - moved);
+				remaining -= moved;
+
+				List<String> provenance =
+					Collections.singletonList(LedgerEvent.FLAG_FIRST_OBSERVATION_RECONCILED);
+				events.add(movement(tick, ts, MovementCategory.TRANSFER, losingContainer, itemId,
+					-moved, ctx, provenance));
+				events.add(movement(tick, ts, MovementCategory.TRANSFER, observedContainer, itemId,
+					moved, ctx, provenance));
+			}
+
+			if (remaining > 0)
+			{
+				stillUnmatched.add(new int[]{losingContainer, remaining});
+			}
+		}
+		return stillUnmatched;
 	}
 
 	private LedgerEvent classifyLoss(int tick, long ts, int containerId, int itemId, int magnitude,

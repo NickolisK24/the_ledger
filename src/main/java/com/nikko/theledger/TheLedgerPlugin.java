@@ -249,9 +249,17 @@ public class TheLedgerPlugin extends Plugin
 		}
 
 		List<ContainerDiffer.Delta> deltas = ContainerDiffer.diff(previous, next);
-		if (!previous.isKnown() && panel != null)
+		if (!previous.isKnown())
 		{
-			panel.recordSilentReseed();
+			// No baseline, so there is no diff and there never can be one. What the container holds
+			// right now is still evidence though: if something else lost exactly these items this
+			// tick, the pair is a transfer rather than a loss. Recorded separately so it can
+			// corroborate and nothing else.
+			tickBuffer.addFirstObservation(next);
+			if (panel != null)
+			{
+				panel.recordSilentReseed();
+			}
 		}
 		tickBuffer.addAll(deltas);
 		snapshots.put(containerId, next);
@@ -303,7 +311,9 @@ public class TheLedgerPlugin extends Plugin
 		int tick = lastTick;
 		long ts = System.currentTimeMillis();
 		List<LedgerEvent> events = resolver.resolveTick(tick, ts, tickBuffer.drain(),
+			tickBuffer.getFirstObservations(), tickBuffer.getBecameKnownThisTick(),
 			lastAction, this::hasBaseline);
+		tickBuffer.clear();
 
 		if (panel != null)
 		{
@@ -588,6 +598,10 @@ public class TheLedgerPlugin extends Plugin
 				continue;
 			}
 			snapshots.put(containerId, snapshotOf(containerId, container));
+			// A direct read is pre-existing state, not evidence that anything moved, so it cannot
+			// corroborate. It still means this container was UNKNOWN when the tick's deltas were
+			// captured, which is what confidence has to be judged against.
+			tickBuffer.markBecameKnown(containerId);
 			if (panel != null)
 			{
 				panel.recordEagerSeed();

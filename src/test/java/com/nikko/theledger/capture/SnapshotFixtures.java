@@ -171,7 +171,12 @@ public final class SnapshotFixtures
 		}
 
 		ContainerSnapshot next = ContainerSnapshot.fromRaw(containerId, ids, qtys, canonicalizer);
-		buffer.addAll(ContainerDiffer.diff(snapshotOf(containerId), next));
+		ContainerSnapshot previous = snapshotOf(containerId);
+		if (!previous.isKnown())
+		{
+			buffer.addFirstObservation(next);
+		}
+		buffer.addAll(ContainerDiffer.diff(previous, next));
 		snapshots.put(containerId, next);
 		return this;
 	}
@@ -183,6 +188,8 @@ public final class SnapshotFixtures
 	public SnapshotFixtures seed(int containerId, int... rawItemIdQuantityPairs)
 	{
 		containerChanged(containerId, rawItemIdQuantityPairs);
+		// A seed models state that was already there, so it leaves no first observation to
+		// corroborate anything with.
 		buffer.clear();
 		return this;
 	}
@@ -208,7 +215,9 @@ public final class SnapshotFixtures
 	 */
 	public List<LedgerEvent> gameTick()
 	{
-		List<LedgerEvent> events = resolver.resolveTick(tick, ts, buffer.drain(), context, baselines());
+		List<LedgerEvent> events = resolver.resolveTick(tick, ts, buffer.drain(),
+			buffer.getFirstObservations(), buffer.getBecameKnownThisTick(), context, baselines());
+		buffer.clear();
 		all.addAll(events);
 		advanceTick();
 		return events;

@@ -53,6 +53,16 @@ public class LedgerEvent
 	 */
 	public static final String FLAG_COUNTERPARTY_UNSEEDED = "COUNTERPARTY_UNSEEDED";
 	/**
+	 * Both legs of this transfer were proven with the help of a container being observed for the
+	 * first time, with no prior baseline of its own.
+	 * <p>
+	 * Provenance, not economics: the category is still TRANSFER and the quantity is still exact.
+	 * It records that one side of the match came from a first observation rather than from a
+	 * measured change, so anything auditing the log can tell corroborated movement apart from
+	 * movement seen from both sides.
+	 */
+	public static final String FLAG_FIRST_OBSERVATION_RECONCILED = "FIRST_OBSERVATION_RECONCILED";
+	/**
 	 * A movement in a container that can only change by transfer, with no counterpart leg
 	 * anywhere in the tick. The items came from or went to storage the spine does not track — a
 	 * rune pouch, a looting bag, a seed vault. Accompanies UNVERIFIED.
