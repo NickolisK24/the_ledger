@@ -24,9 +24,11 @@ import static org.junit.Assert.assertTrue;
  * container's partner. A real session banked worn items while the equipment container had never
  * been observed, and the bank leg was reported on its own as ten items appearing from nowhere.
  * <p>
- * Transfer netting needs BOTH sides seeded, and nothing used to check that precondition. Now a
- * movement whose plausible counterpart is invisible is UNVERIFIED — not a gain, not a loss, and
- * explicitly excluded from cost accounting.
+ * Transfer netting needs BOTH sides seeded, and nothing used to check that precondition. A
+ * movement whose plausible counterpart was invisible now carries a counterparty flag. The
+ * category still records which direction the items went — that is the economic axis — while the
+ * flag records that the quantity must not be believed. Phase 2 filters on the second without
+ * losing the first.
  */
 public class CounterpartyTest
 {
@@ -46,10 +48,13 @@ public class CounterpartyTest
 		List<LedgerEvent> events = f.gameTick();
 
 		assertEquals(SnapshotFixtures.describe(events), 0, SnapshotFixtures.phantomCount(events));
-		assertEquals(2, SnapshotFixtures.withCategory(events, MovementCategory.UNVERIFIED).size());
+		assertEquals(2, SnapshotFixtures.unverifiedCount(events));
 		for (LedgerEvent e : events)
 		{
 			assertTrue(e.hasFlag(LedgerEvent.FLAG_COUNTERPARTY_UNSEEDED));
+			// Confidence is a flag; the economic direction is still on the category, and the
+			// quantity is still signed. Phase 2 filters on the flag without losing either.
+			assertEquals(MovementCategory.UNCLASSIFIED_GAIN, e.getCategory());
 			assertTrue("the direction must survive for Phase 2", e.getQty() > 0);
 		}
 	}
@@ -67,7 +72,7 @@ public class CounterpartyTest
 		List<LedgerEvent> events = f.gameTick();
 
 		assertEquals(0, SnapshotFixtures.phantomCount(events));
-		assertEquals(1, SnapshotFixtures.withCategory(events, MovementCategory.UNVERIFIED).size());
+		assertEquals(1, SnapshotFixtures.unverifiedCount(events));
 		assertTrue(events.get(0).hasFlag(LedgerEvent.FLAG_COUNTERPARTY_UNSEEDED));
 	}
 
@@ -85,7 +90,7 @@ public class CounterpartyTest
 		List<LedgerEvent> events = f.gameTick();
 
 		assertEquals(0, SnapshotFixtures.phantomCount(events));
-		assertEquals(MovementCategory.UNVERIFIED, events.get(0).getCategory());
+		assertTrue(SnapshotFixtures.isUnverified(events.get(0)));
 		assertTrue(events.get(0).hasFlag(LedgerEvent.FLAG_COUNTERPARTY_UNSEEDED));
 	}
 
@@ -101,7 +106,7 @@ public class CounterpartyTest
 		List<LedgerEvent> events = f.gameTick();
 
 		assertEquals(0, SnapshotFixtures.phantomCount(events));
-		assertEquals(MovementCategory.UNVERIFIED, events.get(0).getCategory());
+		assertTrue(SnapshotFixtures.isUnverified(events.get(0)));
 	}
 
 	@Test
@@ -116,7 +121,7 @@ public class CounterpartyTest
 		List<LedgerEvent> events = f.gameTick();
 
 		assertEquals(0, SnapshotFixtures.phantomCount(events));
-		assertEquals(MovementCategory.UNVERIFIED, events.get(0).getCategory());
+		assertTrue(SnapshotFixtures.isUnverified(events.get(0)));
 	}
 
 	// ---- The rule must not swallow everything ----
@@ -174,7 +179,7 @@ public class CounterpartyTest
 		List<LedgerEvent> events = f.gameTick();
 
 		assertEquals(2, SnapshotFixtures.withCategory(events, MovementCategory.TRANSFER).size());
-		assertEquals(0, SnapshotFixtures.withCategory(events, MovementCategory.UNVERIFIED).size());
+		assertEquals(0, SnapshotFixtures.unverifiedCount(events));
 	}
 
 	// ---- Untracked storage: the rune pouch case ----
@@ -199,7 +204,7 @@ public class CounterpartyTest
 		List<LedgerEvent> events = f.gameTick();
 
 		assertEquals(SnapshotFixtures.describe(events), 0, SnapshotFixtures.phantomCount(events));
-		assertEquals(2, SnapshotFixtures.withCategory(events, MovementCategory.UNVERIFIED).size());
+		assertEquals(2, SnapshotFixtures.unverifiedCount(events));
 		for (LedgerEvent e : events)
 		{
 			assertTrue(e.hasFlag(LedgerEvent.FLAG_COUNTERPARTY_UNTRACKED));
@@ -218,7 +223,7 @@ public class CounterpartyTest
 		List<LedgerEvent> events = f.gameTick();
 
 		assertEquals(0, SnapshotFixtures.phantomCount(events));
-		assertEquals(2, SnapshotFixtures.withCategory(events, MovementCategory.UNVERIFIED).size());
+		assertEquals(2, SnapshotFixtures.unverifiedCount(events));
 		for (LedgerEvent e : events)
 		{
 			assertTrue(e.hasFlag(LedgerEvent.FLAG_COUNTERPARTY_UNTRACKED));

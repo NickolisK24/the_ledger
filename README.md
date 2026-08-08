@@ -63,12 +63,15 @@ Phase 1 assigns four:
 - **`DEATH_LOSS`** — removed from inventory or equipment inside the death window.
 - **`UNCLASSIFIED_GAIN`** / **`UNCLASSIFIED_LOSS`** — a real change whose cause the spine cannot
   yet attribute.
-- **`UNVERIFIED`** — one leg of what was almost certainly a transfer, where the other side was
-  invisible. **Not a gain and not a loss.** The sign is still in `qty`, but the quantity must not
-  be counted as wealth appearing or disappearing. See below.
+
 
 `REVENUE`, `CONSUMABLE`, `CHARGE`, `REPAIR`, `DEATH_FEE` and `TRANSPORT` are declared so the
 schema is stable, but Phase 1 never assigns them. There are no price fields.
+
+**Category is the economic axis only.** How much the spine could actually observe is a separate,
+orthogonal question answered by the flags. A movement can be directionally a gain while its
+counterpart was invisible — so a consumer sums by category and filters by confidence
+independently, and no category query has to special-case a member that is not an economic kind.
 
 ### Audit flags
 
@@ -85,11 +88,11 @@ rather than observed can always be found again:
 - `DEATH_BASELINE_HELD` — a state transition arrived while a death was unresolved, so the carried
   containers kept their baselines instead of being reseeded.
 - `COUNTERPARTY_UNSEEDED` — a container this movement could have exchanged with had no baseline,
-  so its leg could not appear even if it happened. Accompanies `UNVERIFIED`.
+  so its leg could not appear even if it happened. The quantity must not be believed.
 - `COUNTERPARTY_UNTRACKED` — a one-legged bank movement. The bank can only change by transfer, so
-  the other side was storage the spine does not track. Accompanies `UNVERIFIED`.
+  the other side was storage the spine does not track. The quantity must not be believed.
 
-### One-legged movements: why `UNVERIFIED` exists
+### One-legged movements, and why confidence is a flag rather than a category
 
 `UNKNOWN` stops the container that has no baseline from reporting phantoms. It does nothing for
 that container's **partner**. A real session banked worn items while the equipment container had
@@ -103,9 +106,15 @@ Two things now prevent it:
    does not change for a long time, so waiting left it `UNKNOWN` while the inventory and bank were
    live — that asymmetry is the bug, and reading removes it at the source. The bank returns null
    until its interface is opened, which is correct: it genuinely has nothing to know yet.
-2. **A residual movement whose counterpart is invisible is `UNVERIFIED`**, never a gain or a loss.
-   Either the counterpart container had no baseline (`COUNTERPARTY_UNSEEDED`), or the movement was
-   in the bank with no counterpart leg at all (`COUNTERPARTY_UNTRACKED`).
+2. **A residual movement whose counterpart is invisible carries a counterparty flag** — either
+   `COUNTERPARTY_UNSEEDED` (the counterpart container had no baseline) or
+   `COUNTERPARTY_UNTRACKED` (a one-legged bank movement). The category still records which
+   direction the items went and `qty` keeps its sign, because that is real information. The flag
+   records that the quantity must not be believed.
+
+   **Anything summing `UNCLASSIFIED_GAIN` or `UNCLASSIFIED_LOSS` must exclude flagged events.**
+   An unflagged unclassified movement is the spine asserting a real change; a flagged one is the
+   spine saying it saw one side of something and cannot vouch for it.
 
 An unseeded **bank** is deliberately not treated as a plausible counterpart for the inventory or
 equipment: the bank interface has to be open to move anything into or out of it, and opening it
@@ -257,8 +266,8 @@ Nothing was earned or lost — runes moved between the bank and a pouch. At Phas
 GP/hr figure computed over a session containing pouch use would be worse than no figure at all.
 
 Phase 1 still does not track the pouch, but it no longer reports these as gains and losses: a
-bank movement with no counterpart leg is `UNVERIFIED` + `COUNTERPARTY_UNTRACKED`, because the
-bank can only change by transfer. That contains the damage without pretending to explain it.
+bank movement with no counterpart leg is flagged `COUNTERPARTY_UNTRACKED`, because the bank can
+only change by transfer. That contains the damage without pretending to explain it.
 **Rune pouch support is a Phase 2 blocker, not a nice-to-have** — until it lands those quantities
 are recorded but unattributable, and Phase 2 must exclude them rather than price them.
 
@@ -273,24 +282,57 @@ A logged session recorded 27 `STATE_RESET` events across 916 ticks, every one of
 — roughly one every 34 ticks in ordinary play with teleports. Each one drops every baseline, so
 the next real movement in each container is absorbed as a re-seed rather than logged.
 
-**Should `LOADING` invalidate everything?** Almost certainly not, and the same session is the
-evidence: 27 resets produced no matching burst of container events, because a region change does
-not make the server resend the inventory. The transitions that genuinely repopulate containers
-are `LOGGING_IN`, `LOGIN_SCREEN`, `HOPPING` and `CONNECTION_LOST` — and the login and hop
-sequences both pass through their own state *before* reaching `LOADING`, so dropping `LOADING`
-from the invalidating set would still leave those covered.
+The likely reason is that not all `LOADING`s are alike. A `LOADING` reached directly from
+`LOGGED_IN` is a teleport or a region crossing, and the client does not resend containers for
+one. A `LOADING` that follows `LOGGING_IN`, `HOPPING` or `CONNECTION_LOST` is part of a genuine
+repopulation — and those states have already invalidated the baselines on their own account
+before `LOADING` is ever reached.
 
-That change is **not** made here, because it narrows a rule that was specified deliberately and
-the trade is a judgement call: fewer absorbed movements against a smaller safety margin. Two
-things are worth knowing before making it:
+So the discrimination is on the **previous** state, and it ships behind a config toggle,
+**"Keep baselines across region loads", default off**:
 
-- Death no longer depends on it. A death holds the carried containers' baselines through the
-  respawn load regardless, so `DEATH_LOSS` fires either way.
-- The same argument applies to experience baselines, which are also cleared on every reset and
-  therefore swallow the next `StatChanged` per skill. A lifetime XP total does not change across
-  a region load, so only the login-screen transitions actually need to clear them.
+| | Toggle OFF (default, current) | Toggle ON (experimental) |
+| --- | --- | --- |
+| `LOGGED_IN` → `LOADING` | reseeds everything | keeps every baseline, no `STATE_RESET` |
+| `LOGGING_IN` / `HOPPING` / `CONNECTION_LOST` → `LOADING` | reseeds | reseeds, unchanged |
+| Movement right after a teleport | absorbed | logged |
+| Death through the respawn load | works | works |
 
-The panel's `reseeds` counter is what makes the cost visible; watch it before and after.
+**This is a hypothesis about client behaviour, not a verified fact**, which is why it defaults
+off. What to compare in the panel across two sessions of similar length and activity:
+
+| Panel line | Toggle OFF | Toggle ON | Meaning |
+| --- | --- | --- | --- |
+| `STATE_RESET` counter | one per region load, tens per session | only logins, hops, disconnects — low single digits | the change working |
+| `seeded` | roughly 2–3 × the reset count | 2–3 for the whole session | baselines no longer being rebuilt |
+| `kept-rgn` | 0 | one per teleport | the new path being taken |
+| `reseeds` | climbs with resets | near zero after startup | absorbed movements |
+| `UNCLASSIFIED_GAIN` unflagged | some | **must not increase** | **the pass/fail test** |
+
+**The test that matters is the last row.** Teleport repeatedly and watch for unexplained gains.
+If any appear — especially a burst matching an inventory's worth of items right after a
+teleport — the hypothesis is wrong, containers *do* repopulate on a region change, and the
+toggle goes back off. Everything else is a bonus; that row is the verdict.
+
+Death does not depend on the setting either way: the carried containers hold their baselines
+through a respawn regardless, and on the experimental path an open death window is pushed back
+by the transition itself even though no reset is recorded.
+
+### Experience baselines
+
+`StatChanged.getXp()` is a lifetime cumulative total, so a baseline stays valid across anything
+that does not change *which account* is being read. It survives a region load, a world hop and a
+logout and login to the same account. Clearing them on every `STATE_RESET` threw away the next
+gain in every skill, 27 times in one session, for no correctness benefit.
+
+Baselines live and die with the resolver, which is replaced when the session rotates to a
+different account hash — the only event that genuinely invalidates them.
+
+**Experience cannot decrease in this game.** A negative computed delta is therefore proof of a
+stale or wrong baseline and never a real event: the baseline is silently repaired, nothing is
+emitted, and the occurrence is counted on the panel's `xp-bad` line. That number must stay at
+zero; a non-zero value means something is handing out stale totals and the XP stream should not
+be trusted until it is explained.
 
 ### Dose and charge ladders
 
@@ -398,8 +440,20 @@ wipe. One-legged movements are covered in both directions for bank↔inventory a
 inventory↔equipment, plus the rune pouch shape where every container is seeded and the
 counterpart is simply not a container at all.
 
+Experience baselines are covered for teleport, relog to the same account, world hop, account
+switch, and the negative-delta guard. The region-load toggle is pinned in both settings,
+including the cost the conservative default pays, so the A/B has a fixed reference on the code
+side.
+
 **Fixture realism is itself a thing to test.** Every one of the defects above got past a green
 suite, because the fixtures seeded only the containers a scenario happened to touch and modelled
 death without the load that always follows it. Fixtures now start from `loggedIn()`, which mirrors
 what eager seeding produces on a real client: inventory and equipment readable immediately, bank
 unreadable until opened.
+
+The same failure shape bit the build once more, from a different direction: the local test
+harness resolved Gson from Maven Central and got a newer version than the client ships, so
+`JsonParser.parseString` compiled locally and did not exist in production. **A test environment
+that is more permissive than production will certify code that cannot run.** The harness is now
+pinned to the versions the client actually resolves — Gson 2.8.5, JUnit 4.12 — and that pin is
+verified rather than assumed.

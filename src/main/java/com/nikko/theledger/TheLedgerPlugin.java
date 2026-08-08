@@ -132,6 +132,10 @@ public class TheLedgerPlugin extends Plugin
 	private ScheduledFuture<?> flushTask;
 
 	private ActionContext lastAction = ActionContext.EMPTY;
+	/**
+	 * The state we came from, which is what separates a region change from a repopulation.
+	 */
+	private GameState previousGameState = GameState.UNKNOWN;
 
 	@Provides
 	TheLedgerConfig provideConfig(ConfigManager configManager)
@@ -147,6 +151,7 @@ public class TheLedgerPlugin extends Plugin
 		snapshots.clear();
 		tickBuffer.clear();
 		lastAction = ActionContext.EMPTY;
+		previousGameState = GameState.UNKNOWN;
 
 		panel = new LedgerDebugPanel();
 		BufferedImage icon = ImageUtil.loadImageResource(TheLedgerPlugin.class, "icon.png");
@@ -262,6 +267,11 @@ public class TheLedgerPlugin extends Plugin
 		// one by reading it directly rather than waiting for it to change.
 		seedMissingBaselines();
 
+		if (panel != null && resolver != null)
+		{
+			panel.setNegativeXpReseeds(resolver.getNegativeXpReseeds());
+		}
+
 		if (tickBuffer.isEmpty())
 		{
 			tickBuffer.clear();
@@ -347,6 +357,26 @@ public class TheLedgerPlugin extends Plugin
 	public void onGameStateChanged(GameStateChanged event)
 	{
 		GameState state = event.getGameState();
+		GameState previous = previousGameState;
+		previousGameState = state;
+
+		if (state == GameState.LOADING && isRegionChange(previous)
+			&& config.keepBaselinesAcrossRegionLoad())
+		{
+			// LOGGED_IN -> LOADING -> LOGGED_IN is a region change. The client does not resend
+			// containers for one, so dropping every baseline here absorbs the next real movement
+			// and buys nothing. A death still has to survive this transition, so the window is
+			// pushed back even though no reset is recorded.
+			if (resolver != null)
+			{
+				resolver.noteTransition(client.getTickCount());
+			}
+			if (panel != null)
+			{
+				panel.recordRegionLoadKept();
+			}
+			return;
+		}
 
 		if (INVALIDATING_STATES.contains(state))
 		{
@@ -358,6 +388,16 @@ public class TheLedgerPlugin extends Plugin
 		{
 			ensureSession();
 		}
+	}
+
+	/**
+	 * A LOADING reached directly from LOGGED_IN is a teleport or a region crossing. A LOADING that
+	 * follows LOGGING_IN, HOPPING or CONNECTION_LOST is part of a genuine repopulation, and those
+	 * states have already invalidated the baselines on their own account.
+	 */
+	private static boolean isRegionChange(GameState previous)
+	{
+		return previous == GameState.LOGGED_IN;
 	}
 
 	// ---- Session lifecycle ----

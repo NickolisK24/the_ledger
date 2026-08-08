@@ -68,6 +68,21 @@ public interface TheLedgerConfig extends Config
 
 	@ConfigItem(
 		position = 5,
+		keyName = "keepBaselinesAcrossRegionLoad",
+		name = "Keep baselines across region loads",
+		description = "EXPERIMENTAL, off by default. A LOADING that arrives straight from "
+			+ "LOGGED_IN is a region change, and the client does not resend containers for one - "
+			+ "so dropping every baseline there absorbs the next real movement for no gain. With "
+			+ "this on, only a LOADING that follows a login, hop or connection loss reseeds. Turn "
+			+ "it on and teleport around: if any unexplained gain appears, turn it back off."
+	)
+	default boolean keepBaselinesAcrossRegionLoad()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		position = 6,
 		keyName = "flushIntervalSeconds",
 		name = "Flush interval (seconds)",
 		description = "How often the background writer drains the queue to disk."

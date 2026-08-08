@@ -42,7 +42,8 @@ public final class SnapshotFixtures
 
 	private final Map<Integer, ContainerSnapshot> snapshots = new HashMap<>();
 	private final TickBuffer buffer = new TickBuffer();
-	private final MovementResolver resolver;
+	private MovementResolver resolver;
+	private final int deathWindowTicks;
 	private final FakeCanonicalizer rawCanonicalizer = new FakeCanonicalizer();
 	private final LedgerContainers.Canonicalizer canonicalizer;
 	private final List<LedgerEvent> all = new ArrayList<>();
@@ -58,6 +59,7 @@ public final class SnapshotFixtures
 
 	public SnapshotFixtures(int deathWindowTicks)
 	{
+		this.deathWindowTicks = deathWindowTicks;
 		this.resolver = new MovementResolver(SESSION, deathWindowTicks,
 			MovementResolver.DEFAULT_ACTION_CONTEXT_TICKS);
 		this.canonicalizer = LedgerContainers.caching(rawCanonicalizer);
@@ -239,6 +241,30 @@ public final class SnapshotFixtures
 		return event;
 	}
 
+	/**
+	 * A region change with the experimental setting on: baselines survive and no STATE_RESET is
+	 * recorded, but an open death window is still pushed back.
+	 * <p>
+	 * Mirrors the region-change branch of {@code TheLedgerPlugin.onGameStateChanged}.
+	 */
+	public SnapshotFixtures regionLoadKeepingBaselines()
+	{
+		resolver.noteTransition(tick);
+		return this;
+	}
+
+	/**
+	 * Rotating to a different account replaces the resolver, exactly as
+	 * {@code TheLedgerPlugin.ensureSession} does. Everything keyed to the old account — the
+	 * experience baselines above all — goes with it.
+	 */
+	public SnapshotFixtures rotateAccount()
+	{
+		resolver = new MovementResolver(SESSION + "-2", deathWindowTicks,
+			MovementResolver.DEFAULT_ACTION_CONTEXT_TICKS);
+		return this;
+	}
+
 	public LedgerEvent death()
 	{
 		LedgerEvent event = resolver.recordDeath(tick, ts);
@@ -285,13 +311,53 @@ public final class SnapshotFixtures
 	}
 
 	/**
-	 * The number of events claiming wealth appeared or disappeared. Every negative fixture
-	 * requires this to be zero.
+	 * Events claiming, without qualification, that wealth appeared or disappeared. Every negative
+	 * fixture requires this to be zero.
+	 * <p>
+	 * A movement carrying a counterparty flag does not count. Category and confidence are
+	 * separate axes: the category still says which direction the items went, while the flag says
+	 * the other side was invisible and the quantity must not be believed. Only an UNQUALIFIED
+	 * unclassified movement is the spine asserting a real change.
 	 */
 	public static int phantomCount(List<LedgerEvent> events)
 	{
-		return withCategory(events, MovementCategory.UNCLASSIFIED_GAIN).size()
-			+ withCategory(events, MovementCategory.UNCLASSIFIED_LOSS).size();
+		int count = 0;
+		for (LedgerEvent e : events)
+		{
+			if (e.getCategory() != MovementCategory.UNCLASSIFIED_GAIN
+				&& e.getCategory() != MovementCategory.UNCLASSIFIED_LOSS)
+			{
+				continue;
+			}
+			if (isUnverified(e))
+			{
+				continue;
+			}
+			count++;
+		}
+		return count;
+	}
+
+	/**
+	 * Movements the spine saw but could not corroborate.
+	 */
+	public static int unverifiedCount(List<LedgerEvent> events)
+	{
+		int count = 0;
+		for (LedgerEvent e : events)
+		{
+			if (isUnverified(e))
+			{
+				count++;
+			}
+		}
+		return count;
+	}
+
+	public static boolean isUnverified(LedgerEvent e)
+	{
+		return e.hasFlag(LedgerEvent.FLAG_COUNTERPARTY_UNSEEDED)
+			|| e.hasFlag(LedgerEvent.FLAG_COUNTERPARTY_UNTRACKED);
 	}
 
 	public static String describe(List<LedgerEvent> events)

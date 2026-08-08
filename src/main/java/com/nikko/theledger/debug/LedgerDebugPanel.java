@@ -57,6 +57,8 @@ public class LedgerDebugPanel extends PluginPanel
 
 	private final AtomicInteger reseeds = new AtomicInteger();
 	private final AtomicInteger eagerSeeds = new AtomicInteger();
+	private final AtomicInteger regionLoadsKept = new AtomicInteger();
+	private volatile int negativeXpReseeds;
 	private final AtomicInteger suppressed = new AtomicInteger();
 	private final AtomicInteger resolvedTicks = new AtomicInteger();
 
@@ -167,6 +169,24 @@ public class LedgerDebugPanel extends PluginPanel
 	}
 
 	/**
+	 * A region load kept its baselines instead of reseeding. Only counts when the experimental
+	 * setting is on; this is the number to compare against reseeds when A/B testing it.
+	 */
+	public void recordRegionLoadKept()
+	{
+		regionLoadsKept.incrementAndGet();
+	}
+
+	/**
+	 * Experience deltas that came out negative, which cannot happen in this game and therefore
+	 * means a stale baseline. Must stay at zero.
+	 */
+	public void setNegativeXpReseeds(int count)
+	{
+		this.negativeXpReseeds = count;
+	}
+
+	/**
 	 * An event was produced with no session open, so it was not written.
 	 */
 	public void recordSuppressed()
@@ -207,6 +227,8 @@ public class LedgerDebugPanel extends PluginPanel
 		containersSeen.clear();
 		reseeds.set(0);
 		eagerSeeds.set(0);
+		regionLoadsKept.set(0);
+		negativeXpReseeds = 0;
 		suppressed.set(0);
 		resolvedTicks.set(0);
 		synchronized (recent)
@@ -239,6 +261,8 @@ public class LedgerDebugPanel extends PluginPanel
 		status.append("ticks    ").append(resolvedTicks.get()).append('\n');
 		status.append("reseeds  ").append(reseeds.get()).append('\n');
 		status.append("seeded   ").append(eagerSeeds.get()).append('\n');
+		status.append("kept-rgn ").append(regionLoadsKept.get()).append('\n');
+		status.append("xp-bad   ").append(negativeXpReseeds).append('\n');
 		status.append("no-sess  ").append(suppressed.get());
 		if (errors > 0)
 		{
@@ -422,8 +446,6 @@ public class LedgerDebugPanel extends PluginPanel
 				return "GAIN";
 			case UNCLASSIFIED_LOSS:
 				return "LOSS";
-			case UNVERIFIED:
-				return "UNVER";
 			default:
 				return category.name();
 		}

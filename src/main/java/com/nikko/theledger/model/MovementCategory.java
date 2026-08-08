@@ -3,6 +3,13 @@ package com.nikko.theledger.model;
 /**
  * Economic classification of an {@link EventType#ITEM_MOVEMENT}.
  * <p>
+ * This is the <b>economic</b> axis only: what kind of value movement this was. How much the
+ * spine could actually observe is a separate, orthogonal question answered by the flags on
+ * {@link LedgerEvent} — a movement can be directionally a gain while its counterpart was
+ * invisible. Keeping the two apart means a consumer can sum by category and filter by
+ * confidence independently, instead of every category query having to special-case a member
+ * that is not an economic kind.
+ * <p>
  * The full enum is declared now so the on-disk schema is stable, but Phase 1 only ever
  * assigns {@link #TRANSFER}, {@link #DEATH_LOSS}, {@link #UNCLASSIFIED_GAIN} and
  * {@link #UNCLASSIFIED_LOSS}. The remaining members are reserved for Phase 2 and are
@@ -28,19 +35,6 @@ public enum MovementCategory
 	 * A decrease the spine cannot yet attribute to a cause.
 	 */
 	UNCLASSIFIED_LOSS,
-	/**
-	 * A movement that was observed but cannot be trusted as a gain or a loss, because the
-	 * container it must have exchanged with was not visible at the time.
-	 * <p>
-	 * This is not a weaker UNCLASSIFIED. It is a statement that the spine saw one leg of what was
-	 * probably a transfer and could not see the other, so counting it as wealth appearing or
-	 * disappearing would fabricate it. The reason is in the flags. <b>Phase 2 must exclude these
-	 * from cost accounting rather than treating them as unattributed revenue or expense.</b>
-	 * <p>
-	 * The sign is still carried in {@code qty}, so the direction survives for anything that later
-	 * learns how to resolve the missing side.
-	 */
-	UNVERIFIED,
 
 	// ---- Reserved for Phase 2. Declared for schema stability, never assigned in Phase 1. ----
 

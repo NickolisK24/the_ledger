@@ -76,6 +76,7 @@ public final class MovementResolver
 	private final Map<String, Integer> xpBaselines = new HashMap<>();
 	private int deathWindowEndTick = NO_DEATH;
 	private int deathWindowExtensions;
+	private int negativeXpReseeds;
 
 	public MovementResolver(String sessionId)
 	{
@@ -236,15 +237,12 @@ public final class MovementResolver
 				ctx, Collections.singletonList(LedgerEvent.FLAG_INFERRED_GRAND_EXCHANGE));
 		}
 
+		// The direction is still a loss. Whether it can be believed is a separate axis, carried
+		// in the flags, so a consumer can sum by category and filter by confidence independently.
 		String unverifiable = unverifiableReason(containerId, seeded);
-		if (unverifiable != null)
-		{
-			return movement(tick, ts, MovementCategory.UNVERIFIED, containerId, itemId,
-				-magnitude, ctx, Collections.singletonList(unverifiable));
-		}
-
 		return movement(tick, ts, MovementCategory.UNCLASSIFIED_LOSS, containerId, itemId,
-			-magnitude, ctx, Collections.emptyList());
+			-magnitude, ctx,
+			unverifiable == null ? Collections.emptyList() : Collections.singletonList(unverifiable));
 	}
 
 	private LedgerEvent classifyGain(int tick, long ts, int containerId, int itemId, int magnitude,
@@ -259,19 +257,15 @@ public final class MovementResolver
 		}
 
 		String unverifiable = unverifiableReason(containerId, seeded);
-		if (unverifiable != null)
-		{
-			return movement(tick, ts, MovementCategory.UNVERIFIED, containerId, itemId, magnitude,
-				ctx, Collections.singletonList(unverifiable));
-		}
-
 		return movement(tick, ts, MovementCategory.UNCLASSIFIED_GAIN, containerId, itemId,
-			magnitude, ctx, Collections.emptyList());
+			magnitude, ctx,
+			unverifiable == null ? Collections.emptyList() : Collections.singletonList(unverifiable));
 	}
 
 	/**
 	 * Why this one-legged movement cannot be trusted as wealth appearing or disappearing, or null
-	 * if it can.
+	 * if it can. Returned as a flag rather than a category: confidence is orthogonal to what kind
+	 * of economic movement this was.
 	 * <p>
 	 * A residual movement is one whose counterpart leg did not show up in this tick. That happens
 	 * for two reasons, and neither of them is "the player got richer":
@@ -331,12 +325,21 @@ public final class MovementResolver
 	 * Converts a cumulative experience total into a delta.
 	 * <p>
 	 * {@code StatChanged.getXp()} is the lifetime total for the skill, not a change. The first
-	 * reading after a login or a state reset therefore has nothing to subtract from, and
-	 * treating it as a delta would log the account's entire experience as a single gain. That
-	 * first reading seeds the baseline and produces no event.
+	 * reading has nothing to subtract from, and treating it as a delta would log the account's
+	 * entire experience as a single gain. That first reading seeds the baseline and emits nothing.
+	 * <p>
+	 * Baselines deliberately survive a STATE_RESET. A lifetime total does not change when a region
+	 * loads or when the same account logs back in, so clearing them there threw away the next
+	 * gain in every skill, 27 times in one observed session. They live and die with the resolver,
+	 * which is replaced when the session rotates to a different account — the only event that can
+	 * genuinely invalidate them.
+	 * <p>
+	 * Experience cannot decrease in this game. A negative delta is therefore proof of a stale or
+	 * wrong baseline and never a real event: the baseline is silently reseeded, nothing is
+	 * emitted, and the occurrence is counted so it is visible rather than invisible.
 	 *
-	 * @return the XP_GAIN event, or null when this reading only seeded a baseline or the total
-	 * did not increase.
+	 * @return the XP_GAIN event, or null when this reading seeded a baseline, reseeded a bad one,
+	 * or the total did not move.
 	 */
 	public LedgerEvent resolveXp(int tick, long ts, String skillName, int totalXp)
 	{
@@ -346,7 +349,13 @@ public final class MovementResolver
 			return null;
 		}
 		int delta = totalXp - baseline;
-		if (delta <= 0)
+		if (delta < 0)
+		{
+			// The map already holds the new total, so the baseline is repaired by this call.
+			negativeXpReseeds++;
+			return null;
+		}
+		if (delta == 0)
 		{
 			return null;
 		}
@@ -389,20 +398,7 @@ public final class MovementResolver
 	 */
 	public LedgerEvent recordStateReset(int tick, long ts, String reason)
 	{
-		xpBaselines.clear();
-
-		boolean heldForDeath = false;
-		if (isInDeathWindow(tick) && deathWindowExtensions < MAX_DEATH_WINDOW_EXTENSIONS)
-		{
-			deathWindowEndTick = tick + deathWindowTicks;
-			deathWindowExtensions++;
-			heldForDeath = true;
-		}
-		else
-		{
-			deathWindowEndTick = NO_DEATH;
-			deathWindowExtensions = 0;
-		}
+		boolean heldForDeath = noteTransition(tick);
 
 		return LedgerEvent.builder()
 			.schemaVersion(LedgerEvent.SCHEMA_VERSION)
@@ -415,6 +411,37 @@ public final class MovementResolver
 				? Collections.singletonList(LedgerEvent.FLAG_DEATH_BASELINE_HELD)
 				: Collections.emptyList())
 			.build();
+	}
+
+	/**
+	 * Tells the resolver a state transition happened, without treating it as a reset.
+	 * <p>
+	 * Used both by {@link #recordStateReset} and by a region load that keeps its baselines: a
+	 * death still has to survive either one, and the respawn load is the transition it has to
+	 * survive.
+	 *
+	 * @return true if an open death window was pushed back rather than closed.
+	 */
+	public boolean noteTransition(int tick)
+	{
+		if (isInDeathWindow(tick) && deathWindowExtensions < MAX_DEATH_WINDOW_EXTENSIONS)
+		{
+			deathWindowEndTick = tick + deathWindowTicks;
+			deathWindowExtensions++;
+			return true;
+		}
+		deathWindowEndTick = NO_DEATH;
+		deathWindowExtensions = 0;
+		return false;
+	}
+
+	/**
+	 * Deltas computed against a baseline that turned out to be wrong. Should stay at zero; a
+	 * non-zero value means something is handing out stale experience totals.
+	 */
+	public int getNegativeXpReseeds()
+	{
+		return negativeXpReseeds;
 	}
 
 	/**
