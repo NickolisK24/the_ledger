@@ -333,7 +333,7 @@ public final class JsonlEventReader
 		}
 		try
 		{
-			JsonElement parsed = JsonParser.parseString(trimmed);
+			JsonElement parsed = new JsonParser().parse(trimmed);
 			return parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
 		}
 		catch (RuntimeException e)
