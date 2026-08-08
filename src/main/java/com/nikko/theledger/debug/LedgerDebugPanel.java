@@ -58,6 +58,14 @@ public class LedgerDebugPanel extends PluginPanel
 	private final AtomicInteger reseeds = new AtomicInteger();
 	private final AtomicInteger eagerSeeds = new AtomicInteger();
 	private final AtomicInteger regionLoadsKept = new AtomicInteger();
+	/**
+	 * Where suppressed events go now that a counterparty flag keeps a movement out of the phantom
+	 * count. Watched exactly like reseeds and xp-bad: both should be flat during ordinary play
+	 * once the containers are seeded.
+	 */
+	private final AtomicInteger unverifiedTotal = new AtomicInteger();
+	private final AtomicInteger counterpartyUnseeded = new AtomicInteger();
+	private final AtomicInteger counterpartyUntracked = new AtomicInteger();
 	private volatile int negativeXpReseeds;
 	private final AtomicInteger suppressed = new AtomicInteger();
 	private final AtomicInteger resolvedTicks = new AtomicInteger();
@@ -127,6 +135,20 @@ public class LedgerDebugPanel extends PluginPanel
 		if (event.getCategory() != null)
 		{
 			categoryCounts[event.getCategory().ordinal()].incrementAndGet();
+		}
+		boolean unseeded = event.hasFlag(LedgerEvent.FLAG_COUNTERPARTY_UNSEEDED);
+		boolean untracked = event.hasFlag(LedgerEvent.FLAG_COUNTERPARTY_UNTRACKED);
+		if (unseeded)
+		{
+			counterpartyUnseeded.incrementAndGet();
+		}
+		if (untracked)
+		{
+			counterpartyUntracked.incrementAndGet();
+		}
+		if (unseeded || untracked)
+		{
+			unverifiedTotal.incrementAndGet();
 		}
 		synchronized (recent)
 		{
@@ -228,6 +250,9 @@ public class LedgerDebugPanel extends PluginPanel
 		reseeds.set(0);
 		eagerSeeds.set(0);
 		regionLoadsKept.set(0);
+		unverifiedTotal.set(0);
+		counterpartyUnseeded.set(0);
+		counterpartyUntracked.set(0);
 		negativeXpReseeds = 0;
 		suppressed.set(0);
 		resolvedTicks.set(0);
@@ -262,6 +287,9 @@ public class LedgerDebugPanel extends PluginPanel
 		status.append("reseeds  ").append(reseeds.get()).append('\n');
 		status.append("seeded   ").append(eagerSeeds.get()).append('\n');
 		status.append("kept-rgn ").append(regionLoadsKept.get()).append('\n');
+		status.append("unverif  ").append(unverifiedTotal.get()).append('\n');
+		status.append("  unseed ").append(counterpartyUnseeded.get()).append('\n');
+		status.append("  untrack").append(' ').append(counterpartyUntracked.get()).append('\n');
 		status.append("xp-bad   ").append(negativeXpReseeds).append('\n');
 		status.append("no-sess  ").append(suppressed.get());
 		if (errors > 0)

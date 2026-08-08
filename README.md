@@ -116,6 +116,65 @@ Two things now prevent it:
    An unflagged unclassified movement is the spine asserting a real change; a flagged one is the
    spine saying it saw one side of something and cannot vouch for it.
 
+#### How the two flags are decided, and why it reads no strings
+
+**The decision is made on container identity alone.** It reads no menu option, no target text
+and no widget id — nothing a game revision or a localised client could change underneath it.
+
+A rune pouch deposit and a monster drop are both one-legged gains with no observable
+counterpart. They are told apart by **where they land**: a drop arrives in the inventory, a pouch
+deposit changes the bank, and the bank cannot receive a drop. That is the whole rule.
+
+| Movement in | Flagged when | Flag |
+| --- | --- | --- |
+| Inventory | equipment has no baseline | `COUNTERPARTY_UNSEEDED` |
+| Equipment | inventory has no baseline | `COUNTERPARTY_UNSEEDED` |
+| Bank | inventory or equipment has no baseline | `COUNTERPARTY_UNSEEDED` |
+| Bank | everything observable was observed and it still did not balance | `COUNTERPARTY_UNTRACKED` |
+| anything else | never | — |
+
+The two flags answer different questions and their preconditions differ deliberately:
+
+- `COUNTERPARTY_UNSEEDED` is returned **only while a counterpart is actually `UNKNOWN`.** The
+  moment that container is seeded, movements stop being flagged for this reason.
+- `COUNTERPARTY_UNTRACKED` does not depend on seeding, because the counterpart was never a
+  tracked container in the first place. It is structural, not observational.
+
+**The default is unflagged, and that direction is chosen on purpose.** A movement in a container
+that gains items from the world — the inventory above all — is never flagged by either rule, so
+a real drop is never suppressed. Over-counting a phantom is recoverable by inspection; discarding
+revenue is not.
+
+#### The flags are load-bearing, so they have their own discipline
+
+Because `phantomCount` excludes flagged events, a bug that *adds a flag* would make a spurious
+event vanish from the metric rather than fail a fixture — the inverse of the safety property the
+negative fixtures exist to provide. Over-applying `COUNTERPARTY_UNSEEDED` would turn every
+negative fixture green while the spine invented movements.
+
+So the rule is pinned exhaustively: every container against every combination of seeded
+baselines, one assertion each, twenty-four cases. Two invariants ride along with every case —
+`COUNTERPARTY_UNSEEDED` never appears while all counterparts are seeded, and an unflagged result
+never appears while one is not. The second is also a runtime `assert`, so the dev client (which
+runs with `-ea`) fails loudly if the two rules ever drift apart.
+
+**If both containers are seeded and a movement still resolves one-legged, that is a real phantom
+and it is emitted unflagged so that it counts.**
+
+#### The one remaining display-string dependency, disclosed
+
+The counterparty rule reads no strings, but a *different* inference does.
+`ActionContext.looksLikeDeposit()` falls back to a case-insensitive `"deposit"` prefix on the
+menu option when the click is not on the deposit-box interface (group 192). That is a display
+string, with the same revision and localisation fragility as the menu labels replaced by
+`MenuAction` constants elsewhere.
+
+It is kept because it is narrow, it is always flagged (`INFERRED_DEPOSIT_BOX`), and its failure
+direction is the safe one: on a localised client the inference simply stops firing, so a deposit
+becomes an `UNCLASSIFIED_LOSS` — a visible phantom loss — rather than silently suppressing a real
+movement. Nothing gains items from it. Worth replacing with a widget-id rule in Phase 2 once the
+full set of deposit-capable interfaces is known.
+
 An unseeded **bank** is deliberately not treated as a plausible counterpart for the inventory or
 equipment: the bank interface has to be open to move anything into or out of it, and opening it
 populates the container. So a kill drop before the bank is ever opened is still a real gain.
@@ -390,6 +449,26 @@ No third-party dependencies are declared beyond what `runelite-client` already p
 Lombok, JUnit 4, and Gson used through its streaming API. There is no reflection, no JNI, no
 subprocess execution, and nothing is downloaded at runtime.
 
+### Dependency floor: the client bundles Gson 2.8.5
+
+**Gson 2.8.5, released in 2018. No Gson API newer than that is available in any phase.** This is
+not a preference, it is the ceiling — the client's bundled version is what the plugin compiles
+and runs against, and Maven Central will happily hand a local build something newer that does not
+exist in production. That is exactly how `JsonParser.parseString` (added in 2.8.6) compiled
+locally and failed the real build.
+
+**Verify any Gson call before writing it**, against the jar rather than the documentation:
+
+```
+javap -cp <gson jar> com.google.gson.JsonParser | grep parse
+unzip -p <gson jar> META-INF/MANIFEST.MF | grep Bundle-Version
+```
+
+The same applies to anything else arriving transitively. The local test harness is pinned to the
+versions the client actually resolves — Gson 2.8.5, JUnit 4.12 — and the pin is verified with the
+command above rather than assumed. A test environment more permissive than production will
+certify code that cannot run.
+
 ### Commit signing
 
 `commit.gpgsign` is set to **false** in this repository's local config, deliberately. It
@@ -439,6 +518,12 @@ container wipe, then `GameStateChanged(LOADING)`, and the variant where the load
 wipe. One-legged movements are covered in both directions for bank↔inventory and
 inventory↔equipment, plus the rune pouch shape where every container is seeded and the
 counterpart is simply not a container at all.
+
+The counterparty flags are pinned exhaustively — three containers against all eight seeding
+combinations, plus the invariant that a both-seeded one-legged movement stays unflagged and
+counts as a real phantom, and that the flag stops the moment its container is seeded. The
+decision's independence from menu strings is asserted by running the same scenario through six
+different menu options, including an empty one and a non-English one.
 
 Experience baselines are covered for teleport, relog to the same account, world hop, account
 switch, and the negative-delta guard. The region-load toggle is pinned in both settings,

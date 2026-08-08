@@ -267,18 +267,28 @@ public final class MovementResolver
 	 * if it can. Returned as a flag rather than a category: confidence is orthogonal to what kind
 	 * of economic movement this was.
 	 * <p>
-	 * A residual movement is one whose counterpart leg did not show up in this tick. That happens
-	 * for two reasons, and neither of them is "the player got richer":
+	 * <b>The decision is made on container identity alone.</b> It reads no menu option, no target
+	 * text and no widget id — nothing that a game revision or a localised client could change
+	 * underneath it. A rune pouch deposit and a monster drop are both one-legged gains with no
+	 * observable counterpart, and they are told apart by <i>where they land</i>: a drop arrives in
+	 * the inventory, and a pouch deposit changes the bank. The bank cannot receive a drop.
+	 * <p>
+	 * Two distinct reasons, with deliberately different preconditions:
 	 * <ol>
-	 *     <li>The counterpart container had no baseline, so it could not report its side even
-	 *     though it moved. Suppressing phantoms on the unseeded container does nothing for its
-	 *     partner, which is how a deposit of worn items becomes a bank full of free items.</li>
-	 *     <li>The counterpart is storage the spine does not track at all — a rune pouch, a looting
-	 *     bag, a seed vault. The bank cannot change any other way, so a one-legged bank movement
-	 *     is proof that something invisible was on the other side.</li>
+	 *     <li>{@code COUNTERPARTY_UNSEEDED} — a container this one could have exchanged with has
+	 *     no baseline, so it could not report its side even though it moved. <b>Only ever returned
+	 *     while a counterpart is actually UNKNOWN.</b> The moment it is seeded, movements stop
+	 *     being flagged for this reason, so the flag can never quietly absorb a genuine phantom.</li>
+	 *     <li>{@code COUNTERPARTY_UNTRACKED} — the movement is in a container that can only change
+	 *     by transfer, so a missing counterpart proves the other side was storage the spine does
+	 *     not track: a rune pouch, a looting bag, a seed vault. This does not depend on seeding,
+	 *     because the counterpart is not a tracked container in the first place.</li>
 	 * </ol>
+	 * The default is deliberately <b>unflagged</b>. A movement in a container that gains items
+	 * from the world — the inventory above all — is never flagged by either rule, so a real drop
+	 * is never suppressed. Over-counting a phantom is recoverable; discarding revenue is not.
 	 */
-	private static String unverifiableReason(int containerId, BaselineStatus seeded)
+	static String unverifiableReason(int containerId, BaselineStatus seeded)
 	{
 		for (int counterpart : LedgerContainers.counterpartsOf(containerId))
 		{
@@ -291,7 +301,27 @@ public final class MovementResolver
 		{
 			return LedgerEvent.FLAG_COUNTERPARTY_UNTRACKED;
 		}
+		// Everything observable was observed and it still did not balance. That is a real
+		// unexplained movement and it must stay unflagged so it counts as one.
+		assert allCounterpartsSeeded(containerId, seeded)
+			: "unflagged movement in " + containerId + " with an unseeded counterpart";
 		return null;
+	}
+
+	/**
+	 * Visible for the flag-discipline fixtures, and asserted above so the dev client (-ea) fails
+	 * loudly if the two rules ever drift apart.
+	 */
+	static boolean allCounterpartsSeeded(int containerId, BaselineStatus seeded)
+	{
+		for (int counterpart : LedgerContainers.counterpartsOf(containerId))
+		{
+			if (!seeded.isSeeded(counterpart))
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**
