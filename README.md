@@ -338,6 +338,48 @@ so the direction is true and the movement is auditable; what is missing is the d
 is exactly what the log now admits. Those surfaces are Phase 2 scope, and each one needs its
 group id confirmed against a real client before it earns an inference.
 
+### Why rules 3 and 4 stop at the tick boundary
+
+Netting is per tick, and that is an assumption about the client rather than a proof, so it is
+written down here and pinned by `CrossTickAssumptionTest` rather than left implicit.
+
+What RuneLite documents: `GameTick` is "an event called once every game tick, **after all packets
+have processed**". The implementation in `Hooks.tick()` matches — a server tick sets a flag, and
+the next client cycle replays the deferred event bus and then posts `GameTick`, incrementing the
+tick counter afterwards. So whether a container change is posted immediately during packet
+processing or deferred to the replay, it reaches subscribers **before** the `GameTick` for the
+cycle that caused it. The plugin buffers on the container events and resolves on `GameTick`, which
+is the only ordering property it actually needs, and that property is documented rather than
+assumed.
+
+What nothing documents: whether the *server* always sends both container updates for one action in
+the same tick's packets. That is invisible from the API. Every ordinary operation observed across
+several live sessions — bank withdrawals and deposits including large rune stacks, equip and
+remove, deposit worn items — has resolved both legs inside one tick, but "not yet observed" is not
+"cannot happen".
+
+**No cross-tick matching window exists, and none will be added on suspicion.** The cost is
+asymmetric: a window wide enough to rejoin a straddled transfer is also wide enough to swallow a
+real pickup followed by a real drop, or a monster drop followed by eating the food that killed it.
+Trading a hypothetical missing pair for a real class of wrongly-netted movements makes the log
+less trustworthy, not more.
+
+If a straddle ever does occur it is already visible in the log with no extra instrumentation. The
+signature is an `UNCLASSIFIED_LOSS` in one tracked container on tick N and an **unflagged**
+`UNCLASSIFIED_GAIN` in another on tick N+1, same canonical item id, equal and opposite quantity.
+`CrossTickAssumptionTest` asserts exactly that shape, so the thing to grep for is pinned in code.
+
+**The 13393 / 22400 anomaly is closed, and it was not this.** A live session showed a movement of
+Xeric's talisman (13393) and a movement of Drakan's medallion (22400) both carrying an action
+context reading like `Withdraw-1:Drakan's medallion`. The items are unrelated and there is no
+canonicalisation between them. The resolver could not have paired them under any circumstances:
+`resolveTick` groups deltas by canonical item id and nets only within one group, and the action
+context is passed through to the emitted event as a label without a single branch pairing on it.
+The shared label is a context that outlived its click by a tick or two — which it is designed to
+do, because the client applies a deposit or a Grand Exchange confirmation after the click that
+caused it — stamped onto the next movement to come along. **Action context is observational
+metadata, never authority.**
+
 Deaths are handled explicitly, and **as a lifecycle sequence rather than a duration**.
 
 The old model started a five-tick window at `ActorDeath`. A live death reached its respawn
