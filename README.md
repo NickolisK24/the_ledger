@@ -333,9 +333,34 @@ IDLE ──ActorDeath──► AWAITING_RESPAWN ──LOADING──► AWAITING_
   inventory was not lost; only what disappeared from inventory and equipment together counts, and
   only the quantity that actually went.
 
-While a death is unresolved, movements out of the carried containers are held back rather than
-classified one at a time — the reconciliation against the frozen baseline is the authority, and
-classifying deltas as well would double-count them.
+**A death owns what it observed, for the whole tick.** A carried container's change is marked as
+belonging to the death when it is **captured**, not when it is classified, and that mark is what
+suppresses it — in both directions, gains as well as losses. Reconciliation against the frozen
+baseline is the authority on what a death did to the carried state; classifying the same deltas as
+well would count the movement twice.
+
+Capture-time ownership is not a detail. The client delivers the container changes first and the
+game tick afterwards, and the tick reconciles the death *before* it classifies what it buffered —
+so reconciliation routinely succeeds on the strength of exactly the observations still sitting in
+the buffer, and closes the death. A suppression keyed to "is a death pending right now" therefore
+reads IDLE by the time it is consulted and lets those observations straight through. A live death
+did exactly that: five correct `DEATH_LOSS` lines followed, on the same tick, by the same five
+losses again as `UNCLASSIFIED_LOSS`. Ownership has to outlive the phase that granted it.
+
+Consequences, stated plainly:
+
+- Ownership survives the reconciliation that closes the death, and lapses at the end of the tick
+  like everything else the buffer holds. Ordinary classification resumes on the next tick.
+- It covers gains too. Protected items arriving in the inventory are not revenue, and an item
+  that ends up worn is not an equipment gain — the reconciler already knows both were carried
+  before and are carried still.
+- It applies only to the inventory and the equipment. A bank change during a pending death is
+  ordinary banking and classifies as it always did.
+- If the death fails closed, its observations stay inside the `DATA_LOSS` marker rather than
+  being released as ordinary movement. That is deliberate: an unmatched carried gain during an
+  unresolved death is dropped rather than reported as revenue. Dropping it leaves a gap the
+  `DATA_LOSS` already declares; reporting it would fabricate income out of respawn bookkeeping,
+  and inventing economic movement is the one failure Phase 1 cannot absorb.
 
 **Failing closed.** A logout, a world hop or a connection loss during a pending death is not a
 respawn and is never treated as one; nor is the client shutting down. Any of them, and a safety
@@ -695,6 +720,15 @@ suite, because the fixtures seeded only the containers a scenario happened to to
 death without the load that always follows it. Fixtures now start from `loggedIn()`, which mirrors
 what eager seeding produces on a real client: inventory and equipment readable immediately, bank
 unreadable until opened.
+
+The death double-count was the same lesson again, at the level of *callback order*. Twenty-two
+death fixtures were green while a live death emitted its wipe twice, because they all asked
+reconciliation for a verdict the instant a container reported and threw the tick's deltas away.
+The client does not work that way: it delivers container changes and then, separately, a game
+tick, and the bug lived entirely in the gap between the two. `SnapshotFixtures.gameTick` now
+mirrors `onGameTick` in full — death resolution included — and `DeathOwnershipTest` drives nothing
+but `containerChanged` and `gameTick`, so a fixture sees the ordering production sees. Seven of
+its fourteen cases fail against the previous commit's classification logic.
 
 The same failure shape bit the build once more, from a different direction: the local test
 harness resolved Gson from Maven Central and got a newer version than the client ships, so

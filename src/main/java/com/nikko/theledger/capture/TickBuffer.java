@@ -47,6 +47,18 @@ public final class TickBuffer
 	 */
 	private final Set<Integer> becameKnownThisTick = new TreeSet<>();
 
+	/**
+	 * Carried containers whose changes this tick belong to an unresolved death.
+	 * <p>
+	 * Marked when the change is <b>captured</b>, not when it is classified. A live death emitted
+	 * its correct DEATH_LOSS lines and then, on the same tick, emitted the same five losses again
+	 * as UNCLASSIFIED_LOSS: reconciliation had already closed the death, so by the time the
+	 * buffered deltas reached ordinary classification the phase read IDLE and they looked like
+	 * ordinary movement. Ownership has to outlive the phase that granted it, which means it
+	 * belongs to the observation rather than to the resolver's current state.
+	 */
+	private final Set<Integer> deathOwned = new TreeSet<>();
+
 	private static long key(int containerId, int itemId)
 	{
 		return ((long) containerId << 32) | (itemId & 0xffffffffL);
@@ -116,6 +128,20 @@ public final class TickBuffer
 		return Collections.unmodifiableSet(becameKnownThisTick);
 	}
 
+	/**
+	 * Records that this container's changes were captured while a death was unresolved, so the
+	 * death reconciler owns them however the tick turns out.
+	 */
+	public void markDeathOwned(int containerId)
+	{
+		deathOwned.add(containerId);
+	}
+
+	public Set<Integer> getDeathOwnedContainers()
+	{
+		return Collections.unmodifiableSet(deathOwned);
+	}
+
 	public boolean isEmpty()
 	{
 		for (Integer v : pending.values())
@@ -160,5 +186,6 @@ public final class TickBuffer
 		pending.clear();
 		firstObservations.clear();
 		becameKnownThisTick.clear();
+		deathOwned.clear();
 	}
 }

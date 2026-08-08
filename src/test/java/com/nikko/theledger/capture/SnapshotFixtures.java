@@ -175,6 +175,14 @@ public final class SnapshotFixtures
 
 		ContainerSnapshot next = ContainerSnapshot.fromRaw(containerId, ids, qtys, canonicalizer);
 		ContainerSnapshot previous = snapshotOf(containerId);
+		if (LedgerContainers.isCarried(containerId))
+		{
+			if (resolver.isDeathPending())
+			{
+				buffer.markDeathOwned(containerId);
+			}
+			resolver.noteCarriedReported(containerId);
+		}
 		if (!previous.isKnown())
 		{
 			buffer.addFirstObservation(next);
@@ -218,8 +226,15 @@ public final class SnapshotFixtures
 	 */
 	public List<LedgerEvent> gameTick()
 	{
-		List<LedgerEvent> events = resolver.resolveTick(tick, ts, buffer.drain(),
-			buffer.getFirstObservations(), buffer.getBecameKnownThisTick(), context, baselines());
+		// Mirrors TheLedgerPlugin.onGameTick exactly, death resolution included, so a fixture sees
+		// the same ordering production does.
+		List<LedgerEvent> events = new ArrayList<>();
+		if (resolver.isDeathPending())
+		{
+			events.addAll(resolver.tryResolveDeath(tick, ts, this::snapshotOf));
+		}
+		events.addAll(resolver.resolveTick(tick, ts, buffer.drain(), buffer.getFirstObservations(),
+			buffer.getBecameKnownThisTick(), buffer.getDeathOwnedContainers(), context, baselines()));
 		buffer.clear();
 		all.addAll(events);
 		advanceTick();
@@ -297,6 +312,14 @@ public final class SnapshotFixtures
 
 	/**
 	 * A carried container reporting after the respawn, then whatever the resolver can now conclude.
+	 * <p>
+	 * This is the <b>resolver-level</b> shortcut: it discards the tick's deltas and asks for a
+	 * verdict immediately, so it says what reconciliation concludes from a given piece of evidence
+	 * and nothing about how that verdict lands alongside ordinary classification. The client does
+	 * not work this way — it delivers container changes and then, separately, a game tick — and a
+	 * live death was double-counted in precisely the gap between the two. Anything asserting on
+	 * what a whole tick emits must use {@link #containerChanged} and {@link #gameTick}; see
+	 * {@code DeathOwnershipTest}.
 	 */
 	public List<LedgerEvent> carriedReported(int containerId, int... rawItemIdQuantityPairs)
 	{

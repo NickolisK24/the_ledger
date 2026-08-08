@@ -264,8 +264,15 @@ public class TheLedgerPlugin extends Plugin
 		tickBuffer.addAll(deltas);
 		snapshots.put(containerId, next);
 
-		if (LedgerContainers.isCarried(containerId))
+		if (LedgerContainers.isCarried(containerId) && resolver != null)
 		{
+			if (resolver.isDeathPending())
+			{
+				// Marked now, while the death is still open. By the time this tick resolves the
+				// death may have closed on the strength of this very observation, and the delta
+				// must not become ordinary movement because of it.
+				tickBuffer.markDeathOwned(containerId);
+			}
 			resolver.noteCarriedReported(containerId);
 		}
 
@@ -322,7 +329,7 @@ public class TheLedgerPlugin extends Plugin
 		long ts = System.currentTimeMillis();
 		List<LedgerEvent> events = resolver.resolveTick(tick, ts, tickBuffer.drain(),
 			tickBuffer.getFirstObservations(), tickBuffer.getBecameKnownThisTick(),
-			lastAction, this::hasBaseline);
+			tickBuffer.getDeathOwnedContainers(), lastAction, this::hasBaseline);
 		tickBuffer.clear();
 
 		if (panel != null)

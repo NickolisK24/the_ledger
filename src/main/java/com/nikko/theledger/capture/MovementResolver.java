@@ -153,7 +153,7 @@ public final class MovementResolver
 										 ActionContext context, BaselineStatus baselines)
 	{
 		return resolveTick(tick, ts, deltas, Collections.emptyMap(), Collections.emptySet(),
-			context, baselines);
+			Collections.emptySet(), context, baselines);
 	}
 
 	/**
@@ -168,10 +168,16 @@ public final class MovementResolver
 	 *                           captured while its counterpart was UNKNOWN does not become
 	 *                           trustworthy just because that counterpart turned up before the
 	 *                           tick resolved.
+	 * @param deathOwnedContainers carried containers whose changes were captured while a death was
+	 *                           unresolved. Their deltas are dropped here entirely, in both
+	 *                           directions, because the death reconciler is the authority on what
+	 *                           a death did to the carried state and classifying them as well
+	 *                           would count the same movement twice.
 	 */
 	public List<LedgerEvent> resolveTick(int tick, long ts, List<ContainerDiffer.Delta> deltas,
 										 Map<Integer, ContainerSnapshot> firstObservations,
 										 Set<Integer> becameKnownThisTick,
+										 Set<Integer> deathOwnedContainers,
 										 ActionContext context, BaselineStatus baselines)
 	{
 		BaselineStatus supplied = baselines == null ? NOTHING_SEEDED : baselines;
@@ -181,6 +187,8 @@ public final class MovementResolver
 			firstObservations == null ? Collections.emptyMap() : firstObservations;
 		// Consumed as matches are made, so one first-observed item cannot corroborate two losses.
 		Map<Integer, Map<Integer, Integer>> available = availableFromFirstObservations(observed);
+		Set<Integer> deathOwned =
+			deathOwnedContainers == null ? Collections.emptySet() : deathOwnedContainers;
 		List<LedgerEvent> events = new ArrayList<>();
 		if (deltas == null || deltas.isEmpty())
 		{
@@ -188,13 +196,20 @@ public final class MovementResolver
 		}
 
 		ActionContext ctx = freshContext(tick, context);
-		boolean deathPending = isDeathPending();
 
 		// Group by canonical item id so both legs of a movement are considered together.
 		Map<Integer, List<ContainerDiffer.Delta>> byItem = new TreeMap<>();
 		for (ContainerDiffer.Delta d : deltas)
 		{
 			if (d.getDelta() == 0)
+			{
+				continue;
+			}
+			// Dropped before anything looks at them, so a death-owned change cannot become a
+			// residual, a netted transfer leg, or anything else. Ownership was decided when the
+			// change was captured and does not lapse because the death closed earlier in this same
+			// tick - which is exactly how a live death got counted twice.
+			if (deathOwned.contains(d.getContainerId()))
 			{
 				continue;
 			}
@@ -277,14 +292,6 @@ public final class MovementResolver
 
 			for (int[] loss : residualLosses)
 			{
-				// While a death is unresolved, what leaves the carried containers is part of the
-				// death and is accounted for by reconciling against the frozen death baseline, not
-				// by classifying deltas one at a time. Classifying here as well would double-count
-				// it, and classifying it as an ordinary loss would be wrong outright.
-				if (deathPending && LedgerContainers.isCarried(loss[0]))
-				{
-					continue;
-				}
 				events.add(classifyLoss(tick, ts, loss[0], itemId, loss[1], ctx, seeded));
 			}
 			for (int[] gain : residualGains)
