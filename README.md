@@ -330,6 +330,52 @@ only change by transfer. That contains the damage without pretending to explain 
 **Rune pouch support is a Phase 2 blocker, not a nice-to-have** — until it lands those quantities
 are recorded but unattributable, and Phase 2 must exclude them rather than price them.
 
+#### The blind spot in `COUNTERPARTY_UNTRACKED`, and its direction
+
+This flag is not a clean signal. **On a bank GAIN it conflates two populations that look
+identical to the spine:**
+
+1. **Untracked-container shuffling** — runes moving between a pouch and the bank, a looting bag
+   being emptied, a seed vault. No economic value is created; the flag is exactly right.
+2. **Direct-to-bank delivery** — rewards and some purchases that land in the bank instead of the
+   inventory, typically because the inventory was full. **This is real revenue**, and the flag is
+   exactly wrong.
+
+Both are a bank quantity going up with no counterpart leg anywhere. Nothing in the container
+diff distinguishes them.
+
+Today this is harmless: Phase 1 assigns no prices, so a mislabelled bank gain costs nothing.
+**In Phase 2 it silently deletes income** — the failure direction that is worse than
+over-counting, because an inflated number gets questioned and a missing one does not.
+
+> **Constraint for Phase 2.** A `COUNTERPARTY_UNTRACKED` bank **gain** is `UNRESOLVED`, not
+> "excluded". It must be surfaced for review — listed, totalled, attributable to a time and an
+> item — never silently dropped from revenue. Excluding it from a GP/hr figure is acceptable
+> only if the figure also reports how much was excluded and why. A bank gain that turns out to be
+> a reward is income the account genuinely earned, and a tracker that quietly loses it is wrong
+> in the way that matters most.
+
+Bank **losses** do not carry this ambiguity: nothing delivers items *out* of a bank without a
+transfer, so a flagged bank loss really is storage shuffling.
+
+**How to separate them, when Phase 2 gets there.** The strongest move is not to discriminate at
+all — it is to **eliminate population 1 by tracking it**. The rune pouch, the looting bag and the
+seed vault are enumerable, and once their contents are diffable those movements become
+two-legged and net to `TRANSFER` on their own. Whatever is still flagged afterwards is delivery.
+That is a better answer than any heuristic and it is already a Phase 2 blocker for other reasons.
+
+Weaker signals, listed so they are not rediscovered, **none of them built in Phase 1**:
+
+- **Inventory slot occupancy at the moment of the gain.** Direct-to-bank delivery happens
+  *because* the inventory is full, so a full inventory is a genuine prior. Cheap —
+  `ItemContainer.count()` against `size()` — but far from conclusive, since pouch shuffling often
+  happens with a full inventory too. A prior, not a test.
+- **Monotonicity across the session.** Shuffling is bidirectional and roughly conserves quantity;
+  delivery only ever adds. An item that only ever gains in the bank is more likely delivered.
+- **Chat messages.** Many deliveries announce themselves. This is a display string, with all the
+  localisation and revision fragility that implies, so it would have to be an inference and be
+  flagged as one.
+
 The same containment covers the looting bag, the seed vault and any other bank-adjacent storage.
 It does **not** cover storage that exchanges with the *inventory* rather than the bank, because a
 one-legged inventory movement is ordinary — that is exactly what a kill drop looks like. Filling
