@@ -264,10 +264,13 @@ public class CounterpartyTest
 	}
 
 	/**
-	 * A death wipe is a known cause, so it outranks both counterparty rules.
+	 * A death wipe is a known cause, so it outranks both counterparty rules — but it no longer does
+	 * so by classifying deltas one at a time. While a death is unresolved, what leaves the carried
+	 * containers is held back and accounted for by reconciling against the frozen death baseline,
+	 * so no counterparty flag is invented for it in the meantime.
 	 */
 	@Test
-	public void deathStillWinsOverTheCounterpartyRules()
+	public void deathSuppressesCarriedLossesRatherThanFlaggingThem()
 	{
 		SnapshotFixtures f = new SnapshotFixtures();
 		f.seed(INVENTORY, SHARK, 10);
@@ -277,6 +280,8 @@ public class CounterpartyTest
 		f.containerChanged(INVENTORY);
 		List<LedgerEvent> events = f.gameTick();
 
-		assertEquals(MovementCategory.DEATH_LOSS, events.get(0).getCategory());
+		assertEquals("the wipe is reconciled, not classified leg by leg", 0, events.size());
+		assertEquals(0, SnapshotFixtures.phantomCount(events));
+		assertEquals(0, SnapshotFixtures.unverifiedCount(events));
 	}
 }

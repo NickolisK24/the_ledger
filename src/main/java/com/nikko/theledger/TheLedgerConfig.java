@@ -41,18 +41,10 @@ public interface TheLedgerConfig extends Config
 		return false;
 	}
 
-	@ConfigItem(
-		position = 3,
-		keyName = "deathWindowTicks",
-		name = "Death window (ticks)",
-		description = "How long after a death inventory and equipment losses count as DEATH_LOSS "
-			+ "rather than an unexplained loss. Adjustable so the default can be checked against a "
-			+ "real death."
-	)
-	default int deathWindowTicks()
-	{
-		return MovementResolver.DEFAULT_DEATH_WINDOW_TICKS;
-	}
+	// The death window config item is gone. Death is a lifecycle sequence with a variable-duration
+	// middle, not a fixed interval, so there is no duration left for a user to tune - it ends when
+	// the carried containers report, and fails closed on a fixed emergency budget that is not a
+	// semantic setting. See MovementResolver.DeathPhase.
 
 	@ConfigItem(
 		position = 4,

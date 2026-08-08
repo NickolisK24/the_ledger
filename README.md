@@ -60,7 +60,7 @@ Phase 1 assigns four:
 
 - **`TRANSFER`** — moved between the player's own containers. **Zero economic weight.** Banking
   is not profit and it is not loss.
-- **`DEATH_LOSS`** — removed from inventory or equipment inside the death window.
+- **`DEATH_LOSS`** — disappeared from the combined carried state across a death.
 - **`UNCLASSIFIED_GAIN`** / **`UNCLASSIFIED_LOSS`** — a real change whose cause the spine cannot
   yet attribute.
 
@@ -84,11 +84,16 @@ rather than observed can always be found again:
   no container on the far side at all.
 - `UNKNOWN_BANK_BASELINE` — the transfer was inferred while the bank interface had not been
   opened this session, so the other leg could not be confirmed.
-- `DEATH_WINDOW` — resolved inside the window opened by a death.
+- `DEATH_WINDOW` — part of a death: the PLAYER_DEATH itself, or a loss reconciled against it.
 - `DEATH_BASELINE_HELD` — a state transition arrived while a death was unresolved, so the carried
   containers kept their baselines instead of being reseeded.
 - `COUNTERPARTY_UNSEEDED` — a container this movement could have exchanged with had no baseline,
   so its leg could not appear even if it happened. The quantity must not be believed.
+- `FIRST_OBSERVATION_RECONCILED` — both legs of this transfer were proven with the help of a
+  container observed for the first time. Provenance, not economics: the category is still
+  `TRANSFER` and the quantity is still exact.
+- `DEATH_RECONCILE_FAILED` — a death was recorded and could not be reconciled. Accompanies a
+  `DATA_LOSS`.
 - `COUNTERPARTY_UNTRACKED` — a one-legged bank movement. The bank can only change by transfer, so
   the other side was storage the spine does not track. The quantity must not be believed.
 
@@ -102,21 +107,44 @@ Transfer netting needs *both* sides seeded, and nothing used to check that preco
 Two things now prevent it:
 
 1. **Containers are seeded eagerly** — at `startUp`, on reaching `LOGGED_IN`, and as a per-tick
-   backstop — by reading each one directly with `getItemContainer` instead of waiting for it to
-   change.
+   backstop — by reading each one directly with `getItemContainer`. Equipment only fires
+   `ItemContainerChanged` when it *changes*, so waiting left it `UNKNOWN` while the inventory and
+   bank were live, and that asymmetry flagged 22 of 22 unclassified losses in a real session.
 
-   **This is not an optimisation, it is the fix for a defect that made the flag useless.**
-   Equipment only fires `ItemContainerChanged` when it *changes*, so a session with no gear swap
-   left it `UNKNOWN` from login to logout. A real session recorded container 94 exactly zero
-   times, and as a result **22 of 22 unclassified losses were flagged** — every one of them rune
-   consumption from casting teleports. A consumed rune is destroyed; there is no counterpart and
-   never was, so "uncorroborated" was the wrong claim about what will be the largest cost
-   category in Phase 2. Seeding at login means `COUNTERPARTY_UNSEEDED` describes a genuine
-   startup race again, not the steady state. Equipment often
-   does not change for a long time, so waiting left it `UNKNOWN` while the inventory and bank were
-   live — that asymmetry is the bug, and reading removes it at the source. The bank returns null
-   until its interface is opened, which is correct: it genuinely has nothing to know yet.
-2. **A residual movement whose counterpart is invisible carries a counterparty flag** — either
+   **This does not close the hole, because `getItemContainer` returning null is ambiguous.** An
+   empty equipment container is never allocated by the client, so null means *either* "empty" *or*
+   "not loaded". A live session logged in wearing nothing, got null on every tick, and equipment
+   stayed `UNKNOWN` all the way to the first equip.
+
+   **`UNKNOWN` is not `EMPTY`, and a null carried container is never assumed empty.** A successful
+   read of the inventory proves the client is alive; it proves nothing about the equipment
+   container. Assuming empty would seed a baseline that was never observed, and the first real
+   update would then read as a gain — trading a phantom loss for a phantom gain. The bank is the
+   same: unopened means unknown, not empty.
+
+2. **A first observation is carried through the tick as evidence, and may only corroborate.**
+   When a container goes from `UNKNOWN` to observed there is no diff and there never can be one,
+   so its contents are held separately from the deltas, where they cannot be mistaken for a
+   change. At resolution they may match an opposite loss another container measured in the same
+   tick; matched quantities become `TRANSFER` on both legs, flagged
+   `FIRST_OBSERVATION_RECONCILED`.
+
+   Everything else about it produces **no event at all**. Whatever it holds that nobody lost is
+   the gear you were already wearing, and it becomes baseline and nothing more. The rule is
+   one-directional: a first observation can never explain a *gain* elsewhere, because a container
+   with no baseline cannot be shown to have given anything up.
+
+   This is the production case it exists for: the inventory lost three graceful pieces and
+   equipment reported its very first observation already holding exactly those three. They now
+   reconcile as six transfer legs instead of three losses the player never took.
+
+3. **Confidence is judged at capture time, not at resolution time.** Equipment became known during
+   that same tick, so the counterparty rule saw a seeded container by the time the tick resolved
+   and flagged nothing — the three losses read as fully trustworthy. A container that became known
+   during a tick, whether by first observation or by direct read, is treated as unseeded for
+   everything captured in it.
+
+4. **A residual movement whose counterpart is invisible carries a counterparty flag** — either
    `COUNTERPARTY_UNSEEDED` (the counterpart container had no baseline) or
    `COUNTERPARTY_UNTRACKED` (a one-legged bank movement). The category still records which
    direction the items went and `qty` keeps its sign, because that is real information. The flag
@@ -281,16 +309,44 @@ trackers go wrong. Five rules do the work:
    flagged. The deposit box and the Grand Exchange are both invisible otherwise; unhandled, a
    ten million coin buy offer logs as a catastrophic loss.
 
-Deaths are handled explicitly: `ActorDeath` for the local player opens a short window during
-which inventory *and equipment* losses are `DEATH_LOSS` rather than unexplained.
+Deaths are handled explicitly, and **as a lifecycle sequence rather than a duration**.
 
-That window has to survive a state transition, and this is not a detail. **Dying triggers a
-respawn region load**, so a `STATE_RESET` always follows a death. While the reset closed the
-window and reseeded the carried containers, the wipe was absorbed as if those containers had
-never been seen — a real session logged a `PLAYER_DEATH` and produced *zero* `DEATH_LOSS` events,
-and no amount of widening the window could have fixed it, because the reset always arrives. The
-respawn load is part of the death sequence, not the end of it, so an open window is pushed back
-(bounded, twice at most) and the carried containers keep their baselines through it.
+The old model started a five-tick window at `ActorDeath`. A live death reached its respawn
+transition at tick 269 having died at 262, so the window had already expired: the carried
+baselines were reseeded, the wipe was absorbed, and the recovered items surfaced later as
+unflagged gains — a missing loss and a fabricated revenue from one event. Widening the number
+would have moved the cliff, not removed it, because the gap is a death animation plus a server
+round trip and neither is constant.
+
+```
+IDLE ──ActorDeath──► AWAITING_RESPAWN ──LOADING──► AWAITING_WIPE ──both carried report──► IDLE
+```
+
+- **`ActorDeath` freezes the carried state** — inventory and equipment as they stood at that
+  instant. Ordinary snapshot churn afterwards cannot redefine it.
+- **The respawn transition advances the death rather than ending it**, and the carried baselines
+  are held across it so the wipe is measured against what was actually being carried. The
+  `STATE_RESET` carries `DEATH_BASELINE_HELD`.
+- **Both carried containers reporting closes it, immediately.** Evidence ends the death, not a
+  clock, which is what keeps the state short in practice while still surviving real timing.
+- **Loss is measured on the combined carried state.** An item that was worn and is now in the
+  inventory was not lost; only what disappeared from inventory and equipment together counts, and
+  only the quantity that actually went.
+
+While a death is unresolved, movements out of the carried containers are held back rather than
+classified one at a time — the reconciliation against the frozen baseline is the authority, and
+classifying deltas as well would double-count them.
+
+**Failing closed.** A logout, a world hop or a connection loss during a pending death is not a
+respawn and is never treated as one; nor is the client shutting down. Any of them, and a safety
+budget of 25 ticks from the death itself, end the death by emitting a `DATA_LOSS` flagged
+`DEATH_RECONCILE_FAILED` and invalidating the carried baselines. That budget is **not** "the point
+after which the death is probably over" — it is the point at which reconciliation has
+demonstrably failed and must say so rather than resume clean accounting. `DATA_LOSS` is the right
+marker because it is exactly what has happened: the log knows economic events occurred and cannot
+say what they were, and `isCompromised()` already picks it up.
+
+There is no death-window setting any more. There is no duration left to tune.
 
 Experience needs the same care as items. `StatChanged.getXp()` is the **lifetime total** for
 the skill, not a change, so the first reading after a login or a state reset seeds a baseline

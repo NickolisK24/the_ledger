@@ -108,11 +108,10 @@ public class RegionLoadTest
 		f.death();
 		f.advanceTick();
 		f.regionLoadKeepingBaselines();
-		assertTrue(f.resolver().isInDeathWindow(f.tick()));
+		assertTrue(f.resolver().isDeathPending());
 
-		f.containerChanged(INVENTORY);
-		f.containerChanged(EQUIPMENT);
-		List<LedgerEvent> events = f.gameTick();
+		f.carriedReported(INVENTORY);
+		List<LedgerEvent> events = f.carriedReported(EQUIPMENT);
 
 		assertEquals(SnapshotFixtures.describe(events), 4,
 			SnapshotFixtures.withCategory(events, MovementCategory.DEATH_LOSS).size());

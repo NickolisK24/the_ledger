@@ -74,6 +74,15 @@ public class LedgerEvent
 	 * absorbs the entire wipe and no DEATH_LOSS is ever recorded.
 	 */
 	public static final String FLAG_DEATH_BASELINE_HELD = "DEATH_BASELINE_HELD";
+	/**
+	 * A death was recorded and could not be reconciled: the lifecycle was interrupted, or no
+	 * carried-container evidence arrived before the safety budget expired.
+	 * <p>
+	 * Accompanies a DATA_LOSS, because that is exactly what it is — the log knows economic events
+	 * occurred and cannot say what they were. Anything computing over the session must exclude it
+	 * rather than treat the gap as nothing having happened.
+	 */
+	public static final String FLAG_DEATH_RECONCILE_FAILED = "DEATH_RECONCILE_FAILED";
 
 	int schemaVersion;
 	String sessionId;

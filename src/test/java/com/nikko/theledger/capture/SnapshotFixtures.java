@@ -54,14 +54,17 @@ public final class SnapshotFixtures
 
 	public SnapshotFixtures()
 	{
-		this(MovementResolver.DEFAULT_DEATH_WINDOW_TICKS);
+		this(0);
 	}
 
-	public SnapshotFixtures(int deathWindowTicks)
+	/**
+	 * The int parameter is a leftover from the retired fixed death window and is ignored. Death
+	 * now ends on lifecycle evidence.
+	 */
+	public SnapshotFixtures(int ignoredDeathWindowTicks)
 	{
-		this.deathWindowTicks = deathWindowTicks;
-		this.resolver = new MovementResolver(SESSION, deathWindowTicks,
-			MovementResolver.DEFAULT_ACTION_CONTEXT_TICKS);
+		this.deathWindowTicks = ignoredDeathWindowTicks;
+		this.resolver = new MovementResolver(SESSION, MovementResolver.DEFAULT_ACTION_CONTEXT_TICKS);
 		this.canonicalizer = LedgerContainers.caching(rawCanonicalizer);
 		// Note links the fixtures rely on.
 		rawCanonicalizer
@@ -231,7 +234,7 @@ public final class SnapshotFixtures
 		// Mirrors TheLedgerPlugin.invalidateBaselines, including the death exception: a death
 		// causes a respawn region load, so reseeding the carried containers there would absorb the
 		// entire wipe.
-		boolean deathPending = resolver.isInDeathWindow(tick);
+		boolean deathPending = resolver.isDeathPending();
 		if (!deathPending)
 		{
 			buffer.clear();
@@ -258,7 +261,7 @@ public final class SnapshotFixtures
 	 */
 	public SnapshotFixtures regionLoadKeepingBaselines()
 	{
-		resolver.noteTransition(tick);
+		resolver.noteRespawnTransition(tick);
 		return this;
 	}
 
@@ -269,16 +272,51 @@ public final class SnapshotFixtures
 	 */
 	public SnapshotFixtures rotateAccount()
 	{
-		resolver = new MovementResolver(SESSION + "-2", deathWindowTicks,
-			MovementResolver.DEFAULT_ACTION_CONTEXT_TICKS);
+		resolver = new MovementResolver(SESSION + "-2", MovementResolver.DEFAULT_ACTION_CONTEXT_TICKS);
 		return this;
 	}
 
 	public LedgerEvent death()
 	{
-		LedgerEvent event = resolver.recordDeath(tick, ts);
+		LedgerEvent event = resolver.recordDeath(tick, ts, this::snapshotOf);
 		all.add(event);
 		return event;
+	}
+
+	/**
+	 * The respawn region load, which is the transition a death has to survive. Mirrors the plugin:
+	 * the carried baselines are held, the death advances rather than ending, and a STATE_RESET is
+	 * still recorded.
+	 */
+	public LedgerEvent respawnLoad()
+	{
+		resolver.noteRespawnTransition(tick);
+		LedgerEvent event = stateReset("LOADING");
+		return event;
+	}
+
+	/**
+	 * A carried container reporting after the respawn, then whatever the resolver can now conclude.
+	 */
+	public List<LedgerEvent> carriedReported(int containerId, int... rawItemIdQuantityPairs)
+	{
+		containerChanged(containerId, rawItemIdQuantityPairs);
+		buffer.clear();
+		resolver.noteCarriedReported(containerId);
+		List<LedgerEvent> events = resolver.tryResolveDeath(tick, ts, this::snapshotOf);
+		all.addAll(events);
+		return events;
+	}
+
+	/**
+	 * Mirrors the plugin's per-tick death check.
+	 */
+	public List<LedgerEvent> deathTick()
+	{
+		List<LedgerEvent> events = resolver.tryResolveDeath(tick, ts, this::snapshotOf);
+		all.addAll(events);
+		advanceTick();
+		return events;
 	}
 
 	public LedgerEvent xp(String skill, int totalXp)

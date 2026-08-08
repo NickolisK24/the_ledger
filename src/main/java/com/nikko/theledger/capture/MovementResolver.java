@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * Classifies a tick's worth of buffered deltas into ledger events.
@@ -40,21 +41,51 @@ public final class MovementResolver
 	 * would miss its own effect.
 	 */
 	public static final int DEFAULT_ACTION_CONTEXT_TICKS = 2;
-	/**
-	 * Ticks after a death during which inventory and equipment losses are DEATH_LOSS.
-	 */
-	public static final int DEFAULT_DEATH_WINDOW_TICKS = 5;
 
 	/**
-	 * How many times a state transition may push the death window back.
+	 * Emergency guard on death reconciliation, in ticks from the death itself.
 	 * <p>
-	 * A death causes a respawn region load, so a STATE_RESET always follows it. One extension
-	 * covers that; two covers a death that loads twice. Bounded so a pathological run of
-	 * transitions cannot hold the window open indefinitely.
+	 * This is <b>not</b> "the point after which the death is probably over". Death ends on
+	 * evidence, not on a clock. This is only the point at which reconciliation has demonstrably
+	 * failed to produce evidence and must fail closed rather than quietly resume clean accounting.
+	 * Generous on purpose: a live death took seven ticks to reach its respawn transition, and the
+	 * previous five-tick model expired before it.
 	 */
-	public static final int MAX_DEATH_WINDOW_EXTENSIONS = 2;
+	public static final int DEATH_RECONCILE_BUDGET_TICKS = 25;
 
 	private static final int NO_DEATH = Integer.MIN_VALUE;
+
+	/**
+	 * Where a death has got to.
+	 * <p>
+	 * A death is a lifecycle sequence with a variable-duration middle, not a fixed interval. The
+	 * old model started a five-tick window at {@code ActorDeath}; a live death reached its respawn
+	 * transition at tick 269 having died at 262, so the window had already expired, the carried
+	 * baselines were reseeded, the wipe was absorbed and the recovered items later surfaced as
+	 * unflagged gains. Widening the number would have moved the cliff, not removed it.
+	 */
+	public enum DeathPhase
+	{
+		IDLE,
+		/**
+		 * The player died and the respawn lifecycle has not arrived yet.
+		 */
+		AWAITING_RESPAWN,
+		/**
+		 * Respawn happened. Waiting for both carried containers to report so the wipe can be
+		 * measured against what was actually being carried.
+		 */
+		AWAITING_WIPE
+	}
+
+	/**
+	 * Read access to the carried containers, supplied by the caller because the resolver does not
+	 * own the snapshots. Client-free by construction.
+	 */
+	public interface CarriedStateSource
+	{
+		ContainerSnapshot snapshotOf(int containerId);
+	}
 
 	/**
 	 * Which containers currently have a baseline. Supplied by the caller because the resolver
@@ -71,23 +102,39 @@ public final class MovementResolver
 	public static final BaselineStatus NOTHING_SEEDED = containerId -> false;
 
 	private final String sessionId;
-	private final int deathWindowTicks;
 	private final int actionContextTicks;
 
 	private final Map<String, Integer> xpBaselines = new HashMap<>();
-	private int deathWindowEndTick = NO_DEATH;
-	private int deathWindowExtensions;
 	private int negativeXpReseeds;
+
+	private DeathPhase deathPhase = DeathPhase.IDLE;
+	private int deathTick = NO_DEATH;
+	/**
+	 * What was being carried at the instant of death, frozen. Ordinary snapshot churn afterwards
+	 * must not be able to redefine it, or the wipe gets measured against the wrong thing.
+	 */
+	private Map<Integer, Map<Integer, Integer>> deathBaseline = Collections.emptyMap();
+	private final Set<Integer> carriedReportedSinceRespawn = new TreeSet<>();
 
 	public MovementResolver(String sessionId)
 	{
-		this(sessionId, DEFAULT_DEATH_WINDOW_TICKS, DEFAULT_ACTION_CONTEXT_TICKS);
+		this(sessionId, DEFAULT_ACTION_CONTEXT_TICKS);
 	}
 
+	/**
+	 * @param deathWindowTicks retained for call compatibility and deliberately ignored. Death ends
+	 *                         on lifecycle evidence, not after a fixed number of ticks; see
+	 *                         {@link DeathPhase}.
+	 */
+	@Deprecated
 	public MovementResolver(String sessionId, int deathWindowTicks, int actionContextTicks)
 	{
+		this(sessionId, actionContextTicks);
+	}
+
+	public MovementResolver(String sessionId, int actionContextTicks)
+	{
 		this.sessionId = sessionId;
-		this.deathWindowTicks = Math.max(0, deathWindowTicks);
 		this.actionContextTicks = Math.max(0, actionContextTicks);
 	}
 
@@ -141,7 +188,7 @@ public final class MovementResolver
 		}
 
 		ActionContext ctx = freshContext(tick, context);
-		boolean inDeathWindow = isInDeathWindow(tick);
+		boolean deathPending = isDeathPending();
 
 		// Group by canonical item id so both legs of a movement are considered together.
 		Map<Integer, List<ContainerDiffer.Delta>> byItem = new TreeMap<>();
@@ -230,8 +277,15 @@ public final class MovementResolver
 
 			for (int[] loss : residualLosses)
 			{
-				events.add(classifyLoss(tick, ts, loss[0], itemId, loss[1], ctx,
-					inDeathWindow, seeded));
+				// While a death is unresolved, what leaves the carried containers is part of the
+				// death and is accounted for by reconciling against the frozen death baseline, not
+				// by classifying deltas one at a time. Classifying here as well would double-count
+				// it, and classifying it as an ordinary loss would be wrong outright.
+				if (deathPending && LedgerContainers.isCarried(loss[0]))
+				{
+					continue;
+				}
+				events.add(classifyLoss(tick, ts, loss[0], itemId, loss[1], ctx, seeded));
 			}
 			for (int[] gain : residualGains)
 			{
@@ -334,16 +388,9 @@ public final class MovementResolver
 	}
 
 	private LedgerEvent classifyLoss(int tick, long ts, int containerId, int itemId, int magnitude,
-									 ActionContext ctx, boolean inDeathWindow, BaselineStatus seeded)
+									 ActionContext ctx, BaselineStatus seeded)
 	{
 		boolean bankBaselineKnown = seeded.isSeeded(LedgerContainers.BANK);
-		// A death empties the inventory and the equipment together. Both are DEATH_LOSS.
-		if (inDeathWindow && LedgerContainers.isCarried(containerId))
-		{
-			return movement(tick, ts, MovementCategory.DEATH_LOSS, containerId, itemId, -magnitude,
-				ctx, Collections.singletonList(LedgerEvent.FLAG_DEATH_WINDOW));
-		}
-
 		// Destinations that never update a container of their own. Always flagged.
 		if (LedgerContainers.isCarried(containerId) && ctx.looksLikeDeposit())
 		{
@@ -527,12 +574,16 @@ public final class MovementResolver
 	}
 
 	/**
-	 * Records a death and opens the death window.
+	 * Records a death and freezes what was being carried at that instant.
+	 *
+	 * @param carried read access to the carried containers as they stand right now
 	 */
-	public LedgerEvent recordDeath(int tick, long ts)
+	public LedgerEvent recordDeath(int tick, long ts, CarriedStateSource carried)
 	{
-		deathWindowEndTick = tick + deathWindowTicks;
-		deathWindowExtensions = 0;
+		deathPhase = DeathPhase.AWAITING_RESPAWN;
+		deathTick = tick;
+		carriedReportedSinceRespawn.clear();
+		deathBaseline = freezeCarried(carried);
 		return LedgerEvent.builder()
 			.schemaVersion(LedgerEvent.SCHEMA_VERSION)
 			.sessionId(sessionId)
@@ -543,18 +594,249 @@ public final class MovementResolver
 			.build();
 	}
 
+	private static Map<Integer, Map<Integer, Integer>> freezeCarried(CarriedStateSource carried)
+	{
+		Map<Integer, Map<Integer, Integer>> frozen = new TreeMap<>();
+		if (carried == null)
+		{
+			return frozen;
+		}
+		for (int containerId : LedgerContainers.TRACKED)
+		{
+			if (!LedgerContainers.isCarried(containerId))
+			{
+				continue;
+			}
+			ContainerSnapshot snapshot = carried.snapshotOf(containerId);
+			if (snapshot != null && snapshot.isKnown())
+			{
+				frozen.put(containerId, new TreeMap<>(snapshot.getQuantities()));
+			}
+		}
+		return frozen;
+	}
+
+	public DeathPhase getDeathPhase()
+	{
+		return deathPhase;
+	}
+
 	/**
-	 * Records that baselines were invalidated, and drops the state that only makes sense relative
-	 * to those baselines.
+	 * True while a death is still being resolved. The caller uses this to hold the carried
+	 * containers' baselines across the respawn transition.
+	 */
+	public boolean isDeathPending()
+	{
+		return deathPhase != DeathPhase.IDLE;
+	}
+
+	/**
+	 * The respawn lifecycle arrived. Only a region load qualifies: a death teleports the player,
+	 * and that is the transition the death has to survive.
+	 *
+	 * @return true if this was consumed as the respawn step.
+	 */
+	public boolean noteRespawnTransition(int tick)
+	{
+		if (deathPhase == DeathPhase.AWAITING_RESPAWN)
+		{
+			deathPhase = DeathPhase.AWAITING_WIPE;
+			carriedReportedSinceRespawn.clear();
+			return true;
+		}
+		// A second load during the same death is part of the same sequence and changes nothing.
+		return deathPhase == DeathPhase.AWAITING_WIPE;
+	}
+
+	/**
+	 * A carried container reported after the respawn. Evidence, not a decision.
+	 */
+	public void noteCarriedReported(int containerId)
+	{
+		if (deathPhase == DeathPhase.AWAITING_WIPE && LedgerContainers.isCarried(containerId))
+		{
+			carriedReportedSinceRespawn.add(containerId);
+		}
+	}
+
+	/**
+	 * Reconciles the death if there is now enough evidence, and otherwise fails closed if the
+	 * safety budget has run out.
 	 * <p>
-	 * A death does not end here. Dying triggers a respawn region load, so a state transition
-	 * always follows a death — which means closing the window on a reset guarantees the window is
-	 * shut before the wipe is ever observed, and DEATH_LOSS can never fire. The respawn load is
-	 * part of the death sequence, not the end of it, so an open window is pushed back instead.
+	 * Loss is measured on the <b>combined</b> carried state rather than per container, because an
+	 * item that was worn and is now in the inventory was not lost. Only what disappeared from
+	 * inventory and equipment together counts, and the quantity is what actually went, not what
+	 * happened to be carried.
+	 *
+	 * @return the events to log: DEATH_LOSS lines on success, a DATA_LOSS gap marker on failure,
+	 * empty while still waiting.
+	 */
+	public List<LedgerEvent> tryResolveDeath(int tick, long ts, CarriedStateSource carried)
+	{
+		if (deathPhase == DeathPhase.IDLE)
+		{
+			return Collections.emptyList();
+		}
+
+		if (deathPhase == DeathPhase.AWAITING_WIPE && hasSufficientWipeEvidence(carried))
+		{
+			List<LedgerEvent> losses = reconcileDeath(tick, ts, carried);
+			closeDeath();
+			return losses;
+		}
+
+		if (tick - deathTick > DEATH_RECONCILE_BUDGET_TICKS)
+		{
+			return Collections.singletonList(failDeathClosed(tick, ts,
+				deathPhase == DeathPhase.AWAITING_RESPAWN
+					? "no respawn transition within budget"
+					: "no carried container evidence within budget"));
+		}
+
+		return Collections.emptyList();
+	}
+
+	/**
+	 * Both carried containers must have reported since the respawn AND currently hold a baseline.
+	 * A container that is UNKNOWN again after the transition is not evidence of a wipe — it is
+	 * absence of evidence, and manufacturing a wipe from it is exactly the mistake first
+	 * observations exist to prevent.
+	 */
+	private boolean hasSufficientWipeEvidence(CarriedStateSource carried)
+	{
+		if (carried == null)
+		{
+			return false;
+		}
+		for (int containerId : LedgerContainers.TRACKED)
+		{
+			if (!LedgerContainers.isCarried(containerId))
+			{
+				continue;
+			}
+			if (!carriedReportedSinceRespawn.contains(containerId))
+			{
+				return false;
+			}
+			ContainerSnapshot now = carried.snapshotOf(containerId);
+			if (now == null || !now.isKnown())
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private List<LedgerEvent> reconcileDeath(int tick, long ts, CarriedStateSource carried)
+	{
+		Map<Integer, Integer> before = combined(deathBaseline);
+		Map<Integer, Integer> after = new TreeMap<>();
+		for (Map.Entry<Integer, Map<Integer, Integer>> e : freezeCarried(carried).entrySet())
+		{
+			for (Map.Entry<Integer, Integer> q : e.getValue().entrySet())
+			{
+				after.merge(q.getKey(), q.getValue(), Integer::sum);
+			}
+		}
+
+		List<LedgerEvent> events = new ArrayList<>();
+		for (Map.Entry<Integer, Integer> entry : before.entrySet())
+		{
+			int itemId = entry.getKey();
+			int lost = entry.getValue() - after.getOrDefault(itemId, 0);
+			if (lost <= 0)
+			{
+				// Still carried, wherever it ended up. Moving between the carried containers is
+				// not a loss.
+				continue;
+			}
+
+			// Attribute what disappeared to where it was at the moment of death, ascending by
+			// container id so the split is deterministic.
+			int remaining = lost;
+			for (Map.Entry<Integer, Map<Integer, Integer>> container : deathBaseline.entrySet())
+			{
+				if (remaining <= 0)
+				{
+					break;
+				}
+				int held = container.getValue().getOrDefault(itemId, 0);
+				int portion = Math.min(remaining, held);
+				if (portion <= 0)
+				{
+					continue;
+				}
+				remaining -= portion;
+				events.add(LedgerEvent.builder()
+					.schemaVersion(LedgerEvent.SCHEMA_VERSION)
+					.sessionId(sessionId)
+					.ts(ts)
+					.tick(tick)
+					.type(EventType.ITEM_MOVEMENT)
+					.category(MovementCategory.DEATH_LOSS)
+					.containerId(container.getKey())
+					.itemId(itemId)
+					.qty(-portion)
+					.flags(Collections.singletonList(LedgerEvent.FLAG_DEATH_WINDOW))
+					.build());
+			}
+		}
+		return events;
+	}
+
+	private static Map<Integer, Integer> combined(Map<Integer, Map<Integer, Integer>> carried)
+	{
+		Map<Integer, Integer> total = new TreeMap<>();
+		for (Map<Integer, Integer> container : carried.values())
+		{
+			for (Map.Entry<Integer, Integer> q : container.entrySet())
+			{
+				total.merge(q.getKey(), q.getValue(), Integer::sum);
+			}
+		}
+		return total;
+	}
+
+	/**
+	 * The lifecycle was interrupted, or no evidence arrived in time.
+	 * <p>
+	 * Reported as DATA_LOSS because that is precisely what it is: the log knows economic events
+	 * occurred and cannot say what they were. Resuming clean accounting as though nothing happened
+	 * would be the one outcome worse than admitting the hole.
+	 */
+	public LedgerEvent failDeathClosed(int tick, long ts, String reason)
+	{
+		closeDeath();
+		return LedgerEvent.builder()
+			.schemaVersion(LedgerEvent.SCHEMA_VERSION)
+			.sessionId(sessionId)
+			.ts(ts)
+			.tick(tick)
+			.type(EventType.DATA_LOSS)
+			.actionContext("death reconciliation failed: " + reason)
+			.flags(Collections.singletonList(LedgerEvent.FLAG_DEATH_RECONCILE_FAILED))
+			.build();
+	}
+
+	private void closeDeath()
+	{
+		deathPhase = DeathPhase.IDLE;
+		deathTick = NO_DEATH;
+		deathBaseline = Collections.emptyMap();
+		carriedReportedSinceRespawn.clear();
+	}
+
+	/**
+	 * Records that baselines were invalidated.
+	 * <p>
+	 * Dying triggers a respawn region load, so a state transition always follows a death. The
+	 * transition does not end the death — {@link #noteRespawnTransition} advances it and the
+	 * carried baselines are held — so the reset simply records that it happened, flagged when it
+	 * landed inside an unresolved death.
 	 */
 	public LedgerEvent recordStateReset(int tick, long ts, String reason)
 	{
-		boolean heldForDeath = noteTransition(tick);
+		boolean heldForDeath = isDeathPending();
 
 		return LedgerEvent.builder()
 			.schemaVersion(LedgerEvent.SCHEMA_VERSION)
@@ -570,28 +852,6 @@ public final class MovementResolver
 	}
 
 	/**
-	 * Tells the resolver a state transition happened, without treating it as a reset.
-	 * <p>
-	 * Used both by {@link #recordStateReset} and by a region load that keeps its baselines: a
-	 * death still has to survive either one, and the respawn load is the transition it has to
-	 * survive.
-	 *
-	 * @return true if an open death window was pushed back rather than closed.
-	 */
-	public boolean noteTransition(int tick)
-	{
-		if (isInDeathWindow(tick) && deathWindowExtensions < MAX_DEATH_WINDOW_EXTENSIONS)
-		{
-			deathWindowEndTick = tick + deathWindowTicks;
-			deathWindowExtensions++;
-			return true;
-		}
-		deathWindowEndTick = NO_DEATH;
-		deathWindowExtensions = 0;
-		return false;
-	}
-
-	/**
 	 * Deltas computed against a baseline that turned out to be wrong. Should stay at zero; a
 	 * non-zero value means something is handing out stale experience totals.
 	 */
@@ -600,14 +860,6 @@ public final class MovementResolver
 		return negativeXpReseeds;
 	}
 
-	/**
-	 * True while a death is still being resolved. The caller uses this to decide whether to keep
-	 * the carried containers' baselines across a state transition.
-	 */
-	public boolean isInDeathWindow(int tick)
-	{
-		return deathWindowEndTick != NO_DEATH && tick <= deathWindowEndTick;
-	}
 
 	/**
 	 * Visible for the debug panel.

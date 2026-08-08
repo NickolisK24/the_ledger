@@ -264,6 +264,11 @@ public class TheLedgerPlugin extends Plugin
 		tickBuffer.addAll(deltas);
 		snapshots.put(containerId, next);
 
+		if (LedgerContainers.isCarried(containerId))
+		{
+			resolver.noteCarriedReported(containerId);
+		}
+
 		if (config.verboseContainerLogging() && !deltas.isEmpty())
 		{
 			log.debug("container {} deltas {}", LedgerContainers.name(containerId), deltas);
@@ -291,6 +296,11 @@ public class TheLedgerPlugin extends Plugin
 		if (panel != null && resolver != null)
 		{
 			panel.setNegativeXpReseeds(resolver.getNegativeXpReseeds());
+		}
+
+		if (resolver != null && resolver.isDeathPending())
+		{
+			resolveDeath(lastTick);
 		}
 
 		if (tickBuffer.isEmpty())
@@ -373,7 +383,9 @@ public class TheLedgerPlugin extends Plugin
 		{
 			return;
 		}
-		emit(resolver.recordDeath(client.getTickCount(), System.currentTimeMillis()));
+		// The carried state is frozen here and nowhere else. Ordinary snapshot churn afterwards
+		// must not be able to redefine what was being carried at the moment of death.
+		emit(resolver.recordDeath(lastTick, System.currentTimeMillis(), this::snapshotFor));
 	}
 
 	/**
@@ -407,6 +419,22 @@ public class TheLedgerPlugin extends Plugin
 		GameState previous = previousGameState;
 		previousGameState = state;
 
+		if (resolver != null && resolver.isDeathPending())
+		{
+			if (state == GameState.LOADING)
+			{
+				// The respawn teleport. This is the transition a death has to survive, and the only
+				// one that counts as progress through it.
+				resolver.noteRespawnTransition(lastTick);
+			}
+			else if (INVALIDATING_STATES.contains(state))
+			{
+				// A logout, a hop, a disconnect. None of these is a respawn, and none of them can
+				// be treated as one. The death is abandoned explicitly rather than silently.
+				failDeathClosed(state.name());
+			}
+		}
+
 		if (state == GameState.LOADING && isRegionChange(previous)
 			&& config.keepBaselinesAcrossRegionLoad())
 		{
@@ -416,7 +444,7 @@ public class TheLedgerPlugin extends Plugin
 			// pushed back even though no reset is recorded.
 			if (resolver != null)
 			{
-				resolver.noteTransition(client.getTickCount());
+				resolver.noteRespawnTransition(lastTick);
 			}
 			if (panel != null)
 			{
@@ -481,7 +509,6 @@ public class TheLedgerPlugin extends Plugin
 			writer = new JsonlEventWriter(sessionManager.getSessionFile(), header,
 				JsonlEventWriter.DEFAULT_QUEUE_CAPACITY);
 			resolver = new MovementResolver(header.getSessionId(),
-				Math.max(0, config.deathWindowTicks()),
 				Math.max(0, config.actionContextTicks()));
 
 			if (panel != null)
@@ -504,6 +531,13 @@ public class TheLedgerPlugin extends Plugin
 		{
 			return;
 		}
+		if (resolver != null && resolver.isDeathPending())
+		{
+			// The client is going away with a death unaccounted for. Say so rather than letting the
+			// session read as clean.
+			failDeathClosed(reason);
+		}
+
 		if (writer != null)
 		{
 			// The footer bypasses the queue, so a full queue cannot eat the one line that
@@ -544,7 +578,7 @@ public class TheLedgerPlugin extends Plugin
 	private void invalidateBaselines(String reason)
 	{
 		int tick = client.getTickCount();
-		boolean deathPending = resolver != null && resolver.isInDeathWindow(tick);
+		boolean deathPending = resolver != null && resolver.isDeathPending();
 
 		if (!deathPending)
 		{
@@ -565,6 +599,35 @@ public class TheLedgerPlugin extends Plugin
 		{
 			emit(resolver.recordStateReset(tick, System.currentTimeMillis(), reason));
 		}
+	}
+
+	/**
+	 * Asks the resolver whether the death can be settled yet, and logs whatever it concludes.
+	 * <p>
+	 * Nothing here decides anything: the resolver closes the death on carried-container evidence,
+	 * or fails it closed once its safety budget expires. A failure invalidates the carried
+	 * baselines through the ordinary mechanism, because continuing to diff against state that
+	 * spans an unaccounted death would be worse than reseeding.
+	 */
+	private void resolveDeath(int tick)
+	{
+		List<LedgerEvent> events = resolver.tryResolveDeath(tick, System.currentTimeMillis(),
+			this::snapshotFor);
+		boolean failed = false;
+		for (LedgerEvent event : events)
+		{
+			emit(event);
+			failed |= event.hasFlag(LedgerEvent.FLAG_DEATH_RECONCILE_FAILED);
+		}
+		if (failed)
+		{
+			invalidateBaselines("deathReconcileFailed");
+		}
+	}
+
+	private void failDeathClosed(String reason)
+	{
+		emit(resolver.failDeathClosed(lastTick, System.currentTimeMillis(), reason));
 	}
 
 	/**
@@ -625,6 +688,15 @@ public class TheLedgerPlugin extends Plugin
 			quantities[i] = item.getQuantity();
 		}
 		return ContainerSnapshot.fromRaw(containerId, ids, quantities, canonicalizer);
+	}
+
+	/**
+	 * Backs {@link MovementResolver.CarriedStateSource}.
+	 */
+	private ContainerSnapshot snapshotFor(int containerId)
+	{
+		ContainerSnapshot snapshot = snapshots.get(containerId);
+		return snapshot == null ? ContainerSnapshot.unknown(containerId) : snapshot;
 	}
 
 	private boolean hasBaseline(int containerId)
