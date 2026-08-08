@@ -42,6 +42,7 @@ public class LedgerDebugPanel extends PluginPanel
 	private final Map<Integer, AtomicInteger> containersSeen = new ConcurrentHashMap<>();
 
 	private final AtomicInteger reseeds = new AtomicInteger();
+	private final AtomicInteger eagerSeeds = new AtomicInteger();
 	private final AtomicInteger suppressed = new AtomicInteger();
 	private final AtomicInteger resolvedTicks = new AtomicInteger();
 
@@ -124,6 +125,16 @@ public class LedgerDebugPanel extends PluginPanel
 	}
 
 	/**
+	 * A container without a baseline was read directly and seeded, rather than waiting for it to
+	 * change. High counts early in a session are expected; a count that keeps climbing means
+	 * something is invalidating baselines repeatedly.
+	 */
+	public void recordEagerSeed()
+	{
+		eagerSeeds.incrementAndGet();
+	}
+
+	/**
 	 * An event was produced with no session open, so it was not written.
 	 */
 	public void recordSuppressed()
@@ -163,6 +174,7 @@ public class LedgerDebugPanel extends PluginPanel
 		}
 		containersSeen.clear();
 		reseeds.set(0);
+		eagerSeeds.set(0);
 		suppressed.set(0);
 		resolvedTicks.set(0);
 		synchronized (recent)
@@ -193,6 +205,7 @@ public class LedgerDebugPanel extends PluginPanel
 		status.append("dropped  ").append(dropped).append('\n');
 		status.append("ticks    ").append(resolvedTicks.get()).append('\n');
 		status.append("reseeds  ").append(reseeds.get()).append('\n');
+		status.append("seeded   ").append(eagerSeeds.get()).append('\n');
 		status.append("no-sess  ").append(suppressed.get());
 		if (errors > 0)
 		{
@@ -311,6 +324,8 @@ public class LedgerDebugPanel extends PluginPanel
 				return "GAIN";
 			case UNCLASSIFIED_LOSS:
 				return "LOSS";
+			case UNVERIFIED:
+				return "UNVER";
 			default:
 				return category.name();
 		}

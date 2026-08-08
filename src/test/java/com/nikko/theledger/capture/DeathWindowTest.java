@@ -93,7 +93,7 @@ public class DeathWindowTest
 	public void windowIsClosedOneTickLater()
 	{
 		SnapshotFixtures f = new SnapshotFixtures(MovementResolver.DEFAULT_DEATH_WINDOW_TICKS);
-		f.seed(INVENTORY, SHARK, 10);
+		f.loggedIn(SHARK, 10);
 
 		f.death();
 		for (int i = 0; i <= MovementResolver.DEFAULT_DEATH_WINDOW_TICKS; i++)
@@ -117,7 +117,7 @@ public class DeathWindowTest
 	public void windowLengthIsConfigurable()
 	{
 		SnapshotFixtures f = new SnapshotFixtures(0);
-		f.seed(INVENTORY, SHARK, 10);
+		f.loggedIn(SHARK, 10);
 
 		f.death();
 		f.gameTick();
@@ -166,8 +166,14 @@ public class DeathWindowTest
 		assertEquals(0, SnapshotFixtures.withCategory(events, MovementCategory.DEATH_LOSS).size());
 	}
 
+	/**
+	 * This test used to assert the opposite, and that assertion is why DEATH_LOSS never fired once
+	 * in a real session. Dying triggers a respawn region load, so a STATE_RESET always arrives
+	 * after a death — closing the window there guaranteed it was shut before the wipe could be
+	 * observed. The respawn load is part of the death sequence, not the end of it.
+	 */
 	@Test
-	public void stateResetClosesTheDeathWindow()
+	public void stateResetHoldsTheDeathWindowOpenForTheRespawnLoad()
 	{
 		SnapshotFixtures f = new SnapshotFixtures();
 		f.death();
@@ -175,6 +181,36 @@ public class DeathWindowTest
 
 		f.stateReset("LOADING");
 
+		assertTrue("the respawn load must not close the window",
+			f.resolver().isInDeathWindow(f.tick()));
+	}
+
+	@Test
+	public void stateResetOutsideADeathStillClosesNothingAndOpensNothing()
+	{
+		SnapshotFixtures f = new SnapshotFixtures();
+		f.stateReset("LOADING");
 		assertFalse(f.resolver().isInDeathWindow(f.tick()));
+	}
+
+	/**
+	 * The window cannot be held open forever by a run of transitions.
+	 */
+	@Test
+	public void deathWindowExtensionsAreBounded()
+	{
+		SnapshotFixtures f = new SnapshotFixtures();
+		f.death();
+		for (int i = 0; i < MovementResolver.MAX_DEATH_WINDOW_EXTENSIONS; i++)
+		{
+			f.stateReset("LOADING");
+			assertTrue(f.resolver().isInDeathWindow(f.tick()));
+			f.advanceTick();
+		}
+
+		f.stateReset("LOADING");
+
+		assertFalse("the window must not be extendable indefinitely",
+			f.resolver().isInDeathWindow(f.tick()));
 	}
 }

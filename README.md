@@ -63,6 +63,9 @@ Phase 1 assigns four:
 - **`DEATH_LOSS`** — removed from inventory or equipment inside the death window.
 - **`UNCLASSIFIED_GAIN`** / **`UNCLASSIFIED_LOSS`** — a real change whose cause the spine cannot
   yet attribute.
+- **`UNVERIFIED`** — one leg of what was almost certainly a transfer, where the other side was
+  invisible. **Not a gain and not a loss.** The sign is still in `qty`, but the quantity must not
+  be counted as wealth appearing or disappearing. See below.
 
 `REVENUE`, `CONSUMABLE`, `CHARGE`, `REPAIR`, `DEATH_FEE` and `TRANSPORT` are declared so the
 schema is stable, but Phase 1 never assigns them. There are no price fields.
@@ -79,6 +82,34 @@ rather than observed can always be found again:
 - `UNKNOWN_BANK_BASELINE` — the transfer was inferred while the bank interface had not been
   opened this session, so the other leg could not be confirmed.
 - `DEATH_WINDOW` — resolved inside the window opened by a death.
+- `DEATH_BASELINE_HELD` — a state transition arrived while a death was unresolved, so the carried
+  containers kept their baselines instead of being reseeded.
+- `COUNTERPARTY_UNSEEDED` — a container this movement could have exchanged with had no baseline,
+  so its leg could not appear even if it happened. Accompanies `UNVERIFIED`.
+- `COUNTERPARTY_UNTRACKED` — a one-legged bank movement. The bank can only change by transfer, so
+  the other side was storage the spine does not track. Accompanies `UNVERIFIED`.
+
+### One-legged movements: why `UNVERIFIED` exists
+
+`UNKNOWN` stops the container that has no baseline from reporting phantoms. It does nothing for
+that container's **partner**. A real session banked worn items while the equipment container had
+never been observed, and the bank leg was logged on its own — ten items appearing from nowhere.
+Transfer netting needs *both* sides seeded, and nothing used to check that precondition.
+
+Two things now prevent it:
+
+1. **Containers are seeded eagerly.** Every tick, any tracked container without a baseline is
+   read directly with `getItemContainer` instead of waiting for it to change. Equipment often
+   does not change for a long time, so waiting left it `UNKNOWN` while the inventory and bank were
+   live — that asymmetry is the bug, and reading removes it at the source. The bank returns null
+   until its interface is opened, which is correct: it genuinely has nothing to know yet.
+2. **A residual movement whose counterpart is invisible is `UNVERIFIED`**, never a gain or a loss.
+   Either the counterpart container had no baseline (`COUNTERPARTY_UNSEEDED`), or the movement was
+   in the bank with no counterpart leg at all (`COUNTERPARTY_UNTRACKED`).
+
+An unseeded **bank** is deliberately not treated as a plausible counterpart for the inventory or
+equipment: the bank interface has to be open to move anything into or out of it, and opening it
+populates the container. So a kill drop before the bank is ever opened is still a real gain.
 
 ### The log is self-describing about its own gaps
 
@@ -173,8 +204,15 @@ trackers go wrong. Five rules do the work:
    ten million coin buy offer logs as a catastrophic loss.
 
 Deaths are handled explicitly: `ActorDeath` for the local player opens a short window during
-which inventory *and equipment* losses are `DEATH_LOSS` rather than unexplained. The window
-length is configurable so the default can be checked against a real death.
+which inventory *and equipment* losses are `DEATH_LOSS` rather than unexplained.
+
+That window has to survive a state transition, and this is not a detail. **Dying triggers a
+respawn region load**, so a `STATE_RESET` always follows a death. While the reset closed the
+window and reseeded the carried containers, the wipe was absorbed as if those containers had
+never been seen — a real session logged a `PLAYER_DEATH` and produced *zero* `DEATH_LOSS` events,
+and no amount of widening the window could have fixed it, because the reset always arrives. The
+respawn load is part of the death sequence, not the end of it, so an open window is pushed back
+(bounded, twice at most) and the carried containers keep their baselines through it.
 
 Experience needs the same care as items. `StatChanged.getXp()` is the **lifetime total** for
 the skill, not a change, so the first reading after a login or a state reset seeds a baseline
@@ -204,6 +242,55 @@ The debug panel lists **every container id the client reports**, tracked or not,
 That list is how you find out which of these an account actually touches, and it is also the
 only thing that would catch the container id constants being wrong — if they were, the spine
 would diff nothing, log nothing, and every unit test would still pass.
+
+**The rune pouch is the one to fix first, and the magnitude is why.** A single logged session
+produced these bank movements with no counterpart leg anywhere:
+
+```
+t580  +14875  +15911  +15851  +14694   "Deposit runes"
+t582  -16000  -16000                   "Withdraw-All"
+t583  -16000  -11966                   "Withdraw-All"
+```
+
+Nothing was earned or lost — runes moved between the bank and a pouch. At Phase 2 prices that is
+**millions of GP of fabricated swing per session**, in both directions, from one item type. A
+GP/hr figure computed over a session containing pouch use would be worse than no figure at all.
+
+Phase 1 still does not track the pouch, but it no longer reports these as gains and losses: a
+bank movement with no counterpart leg is `UNVERIFIED` + `COUNTERPARTY_UNTRACKED`, because the
+bank can only change by transfer. That contains the damage without pretending to explain it.
+**Rune pouch support is a Phase 2 blocker, not a nice-to-have** — until it lands those quantities
+are recorded but unattributable, and Phase 2 must exclude them rather than price them.
+
+The same containment covers the looting bag, the seed vault and any other bank-adjacent storage.
+It does **not** cover storage that exchanges with the *inventory* rather than the bank, because a
+one-legged inventory movement is ordinary — that is exactly what a kill drop looks like. Filling
+a looting bag from the inventory still reads as an `UNCLASSIFIED_LOSS`.
+
+### State transitions and how often they fire
+
+A logged session recorded 27 `STATE_RESET` events across 916 ticks, every one of them `LOADING`
+— roughly one every 34 ticks in ordinary play with teleports. Each one drops every baseline, so
+the next real movement in each container is absorbed as a re-seed rather than logged.
+
+**Should `LOADING` invalidate everything?** Almost certainly not, and the same session is the
+evidence: 27 resets produced no matching burst of container events, because a region change does
+not make the server resend the inventory. The transitions that genuinely repopulate containers
+are `LOGGING_IN`, `LOGIN_SCREEN`, `HOPPING` and `CONNECTION_LOST` — and the login and hop
+sequences both pass through their own state *before* reaching `LOADING`, so dropping `LOADING`
+from the invalidating set would still leave those covered.
+
+That change is **not** made here, because it narrows a rule that was specified deliberately and
+the trade is a judgement call: fewer absorbed movements against a smaller safety margin. Two
+things are worth knowing before making it:
+
+- Death no longer depends on it. A death holds the carried containers' baselines through the
+  respawn load regardless, so `DEATH_LOSS` fires either way.
+- The same argument applies to experience baselines, which are also cleared on every reset and
+  therefore swallow the next `StatChanged` per skill. A lifetime XP total does not change across
+  a region load, so only the login-screen transitions actually need to clear them.
+
+The panel's `reseeds` counter is what makes the cost visible; watch it before and after.
 
 ### Dose and charge ladders
 
@@ -304,3 +391,15 @@ are lost, with the total surviving a write/read round trip on `SESSION_END`.
 Integrity signals are pinned in all four combinations: a crashed session is truncated but not
 compromised, a session with drops and no `SESSION_END` is both, damage inside the body is
 compromised but not truncated, and a clean session is neither.
+
+Death is exercised in its real ordering rather than a convenient one — `ActorDeath`, then the
+container wipe, then `GameStateChanged(LOADING)`, and the variant where the load lands before the
+wipe. One-legged movements are covered in both directions for bank↔inventory and
+inventory↔equipment, plus the rune pouch shape where every container is seeded and the
+counterpart is simply not a container at all.
+
+**Fixture realism is itself a thing to test.** Every one of the defects above got past a green
+suite, because the fixtures seeded only the containers a scenario happened to touch and modelled
+death without the load that always follows it. Fixtures now start from `loggedIn()`, which mirrors
+what eager seeding produces on a real client: inventory and equipment readable immediately, bank
+unreadable until opened.

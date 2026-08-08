@@ -132,7 +132,6 @@ public class TheLedgerPlugin extends Plugin
 	private ScheduledFuture<?> flushTask;
 
 	private ActionContext lastAction = ActionContext.EMPTY;
-	private boolean bankBaselineKnown;
 
 	@Provides
 	TheLedgerConfig provideConfig(ConfigManager configManager)
@@ -148,7 +147,6 @@ public class TheLedgerPlugin extends Plugin
 		snapshots.clear();
 		tickBuffer.clear();
 		lastAction = ActionContext.EMPTY;
-		bankBaselineKnown = false;
 
 		panel = new LedgerDebugPanel();
 		BufferedImage icon = ImageUtil.loadImageResource(TheLedgerPlugin.class, "icon.png");
@@ -201,7 +199,6 @@ public class TheLedgerPlugin extends Plugin
 		canonicalizer = null;
 		sessionManager = null;
 		lastAction = ActionContext.EMPTY;
-		bankBaselineKnown = false;
 	}
 
 	// ---- Capture. All of these run on the client thread. ----
@@ -232,16 +229,7 @@ public class TheLedgerPlugin extends Plugin
 			return;
 		}
 
-		Item[] items = container.getItems();
-		int[] ids = new int[items.length];
-		int[] quantities = new int[items.length];
-		for (int i = 0; i < items.length; i++)
-		{
-			ids[i] = items[i].getId();
-			quantities[i] = items[i].getQuantity();
-		}
-
-		ContainerSnapshot next = ContainerSnapshot.fromRaw(containerId, ids, quantities, canonicalizer);
+		ContainerSnapshot next = snapshotOf(containerId, container);
 		ContainerSnapshot previous = snapshots.get(containerId);
 		if (previous == null)
 		{
@@ -255,13 +243,6 @@ public class TheLedgerPlugin extends Plugin
 		}
 		tickBuffer.addAll(deltas);
 		snapshots.put(containerId, next);
-
-		if (containerId == LedgerContainers.BANK)
-		{
-			// The bank container is only populated once the interface has been opened, so this is
-			// the moment its baseline becomes real.
-			bankBaselineKnown = true;
-		}
 
 		if (config.verboseContainerLogging() && !deltas.isEmpty())
 		{
@@ -277,6 +258,10 @@ public class TheLedgerPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick event)
 	{
+		// Before anything is classified, give every container without a baseline a chance to get
+		// one by reading it directly rather than waiting for it to change.
+		seedMissingBaselines();
+
 		if (tickBuffer.isEmpty())
 		{
 			tickBuffer.clear();
@@ -295,7 +280,7 @@ public class TheLedgerPlugin extends Plugin
 		int tick = client.getTickCount();
 		long ts = System.currentTimeMillis();
 		List<LedgerEvent> events = resolver.resolveTick(tick, ts, tickBuffer.drain(),
-			lastAction, bankBaselineKnown);
+			lastAction, this::hasBaseline);
 
 		if (panel != null)
 		{
@@ -459,26 +444,104 @@ public class TheLedgerPlugin extends Plugin
 	}
 
 	/**
-	 * Drops every baseline and records that it happened.
+	 * Drops baselines and records that it happened.
 	 * <p>
 	 * Containers repopulate after these transitions, and the first observation of each one only
 	 * seeds. Real movements during the transition are therefore missed — the accepted price of
 	 * never inventing one. The panel counts silent reseeds so the cost is visible.
+	 * <p>
+	 * With one exception. Dying triggers a respawn region load, so a transition always follows a
+	 * death; reseeding the carried containers there would absorb the entire wipe and DEATH_LOSS
+	 * could never fire, no matter how long the window was. While a death is being resolved the
+	 * inventory and equipment keep their pre-death baselines, so the wipe is measured against
+	 * what was actually being carried.
 	 */
 	private void invalidateBaselines(String reason)
 	{
-		tickBuffer.clear();
+		int tick = client.getTickCount();
+		boolean deathPending = resolver != null && resolver.isInDeathWindow(tick);
+
+		if (!deathPending)
+		{
+			tickBuffer.clear();
+		}
+
 		for (Integer containerId : new ArrayList<>(snapshots.keySet()))
 		{
+			if (deathPending && LedgerContainers.isCarried(containerId))
+			{
+				continue;
+			}
 			snapshots.put(containerId, ContainerSnapshot.unknown(containerId));
 		}
-		bankBaselineKnown = false;
 		lastAction = ActionContext.EMPTY;
 
 		if (resolver != null)
 		{
-			emit(resolver.recordStateReset(client.getTickCount(), System.currentTimeMillis(), reason));
+			emit(resolver.recordStateReset(tick, System.currentTimeMillis(), reason));
 		}
+	}
+
+	/**
+	 * Reads any tracked container that has no baseline and seeds one from its current contents.
+	 * <p>
+	 * Waiting for {@code ItemContainerChanged} means a container is only ever seeded when it
+	 * changes. Equipment often does not change for a long time, so it stays UNKNOWN while the
+	 * inventory and bank are seeded and reporting — and a movement between a seeded container and
+	 * an unseeded one produces exactly one leg, which is a phantom. Reading the container
+	 * directly removes the asymmetry at its source.
+	 * <p>
+	 * The bank returns null until its interface has been opened, which is correct: it genuinely
+	 * has no contents to know yet, and it stays UNKNOWN.
+	 */
+	private void seedMissingBaselines()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		for (int containerId : LedgerContainers.TRACKED)
+		{
+			ContainerSnapshot existing = snapshots.get(containerId);
+			if (existing != null && existing.isKnown())
+			{
+				continue;
+			}
+			ItemContainer container = client.getItemContainer(containerId);
+			if (container == null)
+			{
+				continue;
+			}
+			snapshots.put(containerId, snapshotOf(containerId, container));
+			if (panel != null)
+			{
+				panel.recordEagerSeed();
+			}
+		}
+	}
+
+	private ContainerSnapshot snapshotOf(int containerId, ItemContainer container)
+	{
+		Item[] items = container.getItems();
+		int[] ids = new int[items.length];
+		int[] quantities = new int[items.length];
+		for (int i = 0; i < items.length; i++)
+		{
+			Item item = items[i];
+			if (item == null)
+			{
+				continue;
+			}
+			ids[i] = item.getId();
+			quantities[i] = item.getQuantity();
+		}
+		return ContainerSnapshot.fromRaw(containerId, ids, quantities, canonicalizer);
+	}
+
+	private boolean hasBaseline(int containerId)
+	{
+		ContainerSnapshot snapshot = snapshots.get(containerId);
+		return snapshot != null && snapshot.isKnown();
 	}
 
 	// ---- Plumbing ----

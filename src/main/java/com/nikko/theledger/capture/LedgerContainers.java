@@ -67,6 +67,11 @@ public final class LedgerContainers
 	public static final int IFACE_GE_OFFERS_SIDE = 467;
 
 	/**
+	 * The three containers Phase 1 diffs, in a fixed order.
+	 */
+	public static final int[] TRACKED = {INVENTORY, EQUIPMENT, BANK};
+
+	/**
 	 * The three containers Phase 1 diffs. Everything else is counted for visibility in the
 	 * debug panel but never diffed, because classifying a shop or another player's trade
 	 * offer is Phase 2 work.
@@ -74,6 +79,45 @@ public final class LedgerContainers
 	public static boolean isTracked(int containerId)
 	{
 		return containerId == INVENTORY || containerId == EQUIPMENT || containerId == BANK;
+	}
+
+	/**
+	 * Containers a movement in {@code containerId} could plausibly have exchanged with, and which
+	 * therefore need a baseline before that movement can be trusted as a real gain or loss.
+	 * <p>
+	 * The bank is deliberately absent from the carried containers' lists. The bank container is
+	 * only populated once its interface is open, and the interface has to be open to move
+	 * anything into or out of it — so an unseeded bank is not a plausible counterpart, it is
+	 * proof that no banking happened. The reverse is not true: the inventory and the equipment
+	 * exchange with each other constantly and either can be unseeded, which is exactly how a
+	 * one-legged phantom is produced.
+	 */
+	public static int[] counterpartsOf(int containerId)
+	{
+		switch (containerId)
+		{
+			case BANK:
+				return new int[]{INVENTORY, EQUIPMENT};
+			case INVENTORY:
+				return new int[]{EQUIPMENT};
+			case EQUIPMENT:
+				return new int[]{INVENTORY};
+			default:
+				return new int[0];
+		}
+	}
+
+	/**
+	 * True for containers whose contents can only change by moving items to or from somewhere
+	 * else, so a movement with no counterpart leg means the other side was invisible.
+	 * <p>
+	 * Only the bank qualifies. The inventory gains items from the world and loses them to
+	 * consumption, and equipment ids change on their own as gear degrades, so a one-legged
+	 * movement in either of those is ordinary.
+	 */
+	public static boolean changesOnlyByTransfer(int containerId)
+	{
+		return containerId == BANK;
 	}
 
 	/**

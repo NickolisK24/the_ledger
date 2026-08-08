@@ -75,11 +75,11 @@ public class StateResetTest
 	public void resetInvalidatesTheBankBaseline()
 	{
 		SnapshotFixtures f = fullyLoadedAccount();
-		assertTrue(f.bankSeen());
+		assertTrue(f.isSeeded(BANK));
 
 		f.stateReset("HOPPING");
 
-		assertFalse(f.bankSeen());
+		assertFalse(f.isSeeded(BANK));
 		assertFalse(f.snapshotOf(BANK).isKnown());
 		assertFalse(f.snapshotOf(INVENTORY).isKnown());
 		assertFalse(f.snapshotOf(EQUIPMENT).isKnown());

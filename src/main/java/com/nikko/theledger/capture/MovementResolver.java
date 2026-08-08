@@ -44,12 +44,38 @@ public final class MovementResolver
 	 */
 	public static final int DEFAULT_DEATH_WINDOW_TICKS = 5;
 
+	/**
+	 * How many times a state transition may push the death window back.
+	 * <p>
+	 * A death causes a respawn region load, so a STATE_RESET always follows it. One extension
+	 * covers that; two covers a death that loads twice. Bounded so a pathological run of
+	 * transitions cannot hold the window open indefinitely.
+	 */
+	public static final int MAX_DEATH_WINDOW_EXTENSIONS = 2;
+
+	private static final int NO_DEATH = Integer.MIN_VALUE;
+
+	/**
+	 * Which containers currently have a baseline. Supplied by the caller because the resolver
+	 * does not own the snapshots.
+	 */
+	public interface BaselineStatus
+	{
+		boolean isSeeded(int containerId);
+	}
+
+	/**
+	 * Nothing has a baseline. Useful for fixtures and as a safe default.
+	 */
+	public static final BaselineStatus NOTHING_SEEDED = containerId -> false;
+
 	private final String sessionId;
 	private final int deathWindowTicks;
 	private final int actionContextTicks;
 
 	private final Map<String, Integer> xpBaselines = new HashMap<>();
-	private int deathWindowEndTick = Integer.MIN_VALUE;
+	private int deathWindowEndTick = NO_DEATH;
+	private int deathWindowExtensions;
 
 	public MovementResolver(String sessionId)
 	{
@@ -66,17 +92,18 @@ public final class MovementResolver
 	/**
 	 * Resolves one tick.
 	 *
-	 * @param deltas            everything {@link TickBuffer#drain()} produced for this tick
-	 * @param context           the most recent menu interaction, or {@link ActionContext#EMPTY}
-	 * @param bankBaselineKnown whether the bank container has a baseline yet. False means the
-	 *                          bank interface has not been opened, so a transfer inferred
-	 *                          against it cannot be confirmed and is flagged.
+	 * @param deltas    everything {@link TickBuffer#drain()} produced for this tick
+	 * @param context   the most recent menu interaction, or {@link ActionContext#EMPTY}
+	 * @param baselines which containers currently have a baseline. A movement whose plausible
+	 *                  counterpart has none cannot be trusted as a gain or a loss, because the
+	 *                  other leg could not have appeared even if it happened.
 	 * @return the events to log, in a deterministic order: transfer legs first, then losses,
 	 * then gains, each group ordered by container id.
 	 */
 	public List<LedgerEvent> resolveTick(int tick, long ts, List<ContainerDiffer.Delta> deltas,
-										 ActionContext context, boolean bankBaselineKnown)
+										 ActionContext context, BaselineStatus baselines)
 	{
+		BaselineStatus seeded = baselines == null ? NOTHING_SEEDED : baselines;
 		List<LedgerEvent> events = new ArrayList<>();
 		if (deltas == null || deltas.isEmpty())
 		{
@@ -168,11 +195,11 @@ public final class MovementResolver
 			for (int[] loss : residualLosses)
 			{
 				events.add(classifyLoss(tick, ts, loss[0], itemId, loss[1], ctx,
-					inDeathWindow, bankBaselineKnown));
+					inDeathWindow, seeded));
 			}
 			for (int[] gain : residualGains)
 			{
-				events.add(classifyGain(tick, ts, gain[0], itemId, gain[1], ctx));
+				events.add(classifyGain(tick, ts, gain[0], itemId, gain[1], ctx, seeded));
 			}
 		}
 
@@ -180,8 +207,9 @@ public final class MovementResolver
 	}
 
 	private LedgerEvent classifyLoss(int tick, long ts, int containerId, int itemId, int magnitude,
-									 ActionContext ctx, boolean inDeathWindow, boolean bankBaselineKnown)
+									 ActionContext ctx, boolean inDeathWindow, BaselineStatus seeded)
 	{
+		boolean bankBaselineKnown = seeded.isSeeded(LedgerContainers.BANK);
 		// A death empties the inventory and the equipment together. Both are DEATH_LOSS.
 		if (inDeathWindow && LedgerContainers.isCarried(containerId))
 		{
@@ -208,12 +236,19 @@ public final class MovementResolver
 				ctx, Collections.singletonList(LedgerEvent.FLAG_INFERRED_GRAND_EXCHANGE));
 		}
 
+		String unverifiable = unverifiableReason(containerId, seeded);
+		if (unverifiable != null)
+		{
+			return movement(tick, ts, MovementCategory.UNVERIFIED, containerId, itemId,
+				-magnitude, ctx, Collections.singletonList(unverifiable));
+		}
+
 		return movement(tick, ts, MovementCategory.UNCLASSIFIED_LOSS, containerId, itemId,
 			-magnitude, ctx, Collections.emptyList());
 	}
 
 	private LedgerEvent classifyGain(int tick, long ts, int containerId, int itemId, int magnitude,
-									 ActionContext ctx)
+									 ActionContext ctx, BaselineStatus seeded)
 	{
 		// Collecting a completed offer, or withdrawing from the collection box: the items come
 		// from a holding area the client exposes no container for.
@@ -223,8 +258,46 @@ public final class MovementResolver
 				ctx, Collections.singletonList(LedgerEvent.FLAG_INFERRED_GRAND_EXCHANGE));
 		}
 
+		String unverifiable = unverifiableReason(containerId, seeded);
+		if (unverifiable != null)
+		{
+			return movement(tick, ts, MovementCategory.UNVERIFIED, containerId, itemId, magnitude,
+				ctx, Collections.singletonList(unverifiable));
+		}
+
 		return movement(tick, ts, MovementCategory.UNCLASSIFIED_GAIN, containerId, itemId,
 			magnitude, ctx, Collections.emptyList());
+	}
+
+	/**
+	 * Why this one-legged movement cannot be trusted as wealth appearing or disappearing, or null
+	 * if it can.
+	 * <p>
+	 * A residual movement is one whose counterpart leg did not show up in this tick. That happens
+	 * for two reasons, and neither of them is "the player got richer":
+	 * <ol>
+	 *     <li>The counterpart container had no baseline, so it could not report its side even
+	 *     though it moved. Suppressing phantoms on the unseeded container does nothing for its
+	 *     partner, which is how a deposit of worn items becomes a bank full of free items.</li>
+	 *     <li>The counterpart is storage the spine does not track at all — a rune pouch, a looting
+	 *     bag, a seed vault. The bank cannot change any other way, so a one-legged bank movement
+	 *     is proof that something invisible was on the other side.</li>
+	 * </ol>
+	 */
+	private static String unverifiableReason(int containerId, BaselineStatus seeded)
+	{
+		for (int counterpart : LedgerContainers.counterpartsOf(containerId))
+		{
+			if (!seeded.isSeeded(counterpart))
+			{
+				return LedgerEvent.FLAG_COUNTERPARTY_UNSEEDED;
+			}
+		}
+		if (LedgerContainers.changesOnlyByTransfer(containerId))
+		{
+			return LedgerEvent.FLAG_COUNTERPARTY_UNTRACKED;
+		}
+		return null;
 	}
 
 	/**
@@ -294,6 +367,7 @@ public final class MovementResolver
 	public LedgerEvent recordDeath(int tick, long ts)
 	{
 		deathWindowEndTick = tick + deathWindowTicks;
+		deathWindowExtensions = 0;
 		return LedgerEvent.builder()
 			.schemaVersion(LedgerEvent.SCHEMA_VERSION)
 			.sessionId(sessionId)
@@ -305,13 +379,31 @@ public final class MovementResolver
 	}
 
 	/**
-	 * Records that every baseline was invalidated, and drops the state that only makes sense
-	 * relative to those baselines.
+	 * Records that baselines were invalidated, and drops the state that only makes sense relative
+	 * to those baselines.
+	 * <p>
+	 * A death does not end here. Dying triggers a respawn region load, so a state transition
+	 * always follows a death — which means closing the window on a reset guarantees the window is
+	 * shut before the wipe is ever observed, and DEATH_LOSS can never fire. The respawn load is
+	 * part of the death sequence, not the end of it, so an open window is pushed back instead.
 	 */
 	public LedgerEvent recordStateReset(int tick, long ts, String reason)
 	{
 		xpBaselines.clear();
-		deathWindowEndTick = Integer.MIN_VALUE;
+
+		boolean heldForDeath = false;
+		if (isInDeathWindow(tick) && deathWindowExtensions < MAX_DEATH_WINDOW_EXTENSIONS)
+		{
+			deathWindowEndTick = tick + deathWindowTicks;
+			deathWindowExtensions++;
+			heldForDeath = true;
+		}
+		else
+		{
+			deathWindowEndTick = NO_DEATH;
+			deathWindowExtensions = 0;
+		}
+
 		return LedgerEvent.builder()
 			.schemaVersion(LedgerEvent.SCHEMA_VERSION)
 			.sessionId(sessionId)
@@ -319,12 +411,19 @@ public final class MovementResolver
 			.tick(tick)
 			.type(EventType.STATE_RESET)
 			.actionContext(reason)
+			.flags(heldForDeath
+				? Collections.singletonList(LedgerEvent.FLAG_DEATH_BASELINE_HELD)
+				: Collections.emptyList())
 			.build();
 	}
 
+	/**
+	 * True while a death is still being resolved. The caller uses this to decide whether to keep
+	 * the carried containers' baselines across a state transition.
+	 */
 	public boolean isInDeathWindow(int tick)
 	{
-		return deathWindowEndTick != Integer.MIN_VALUE && tick <= deathWindowEndTick;
+		return deathWindowEndTick != NO_DEATH && tick <= deathWindowEndTick;
 	}
 
 	/**
@@ -353,8 +452,8 @@ public final class MovementResolver
 	 * Fixture convenience.
 	 */
 	public List<LedgerEvent> resolveTick(int tick, long ts, ActionContext context,
-										 boolean bankBaselineKnown, ContainerDiffer.Delta... deltas)
+										 BaselineStatus baselines, ContainerDiffer.Delta... deltas)
 	{
-		return resolveTick(tick, ts, Arrays.asList(deltas), context, bankBaselineKnown);
+		return resolveTick(tick, ts, Arrays.asList(deltas), context, baselines);
 	}
 }

@@ -97,7 +97,7 @@ public class MovementResolverNegativeTest
 		SnapshotFixtures f = new SnapshotFixtures();
 		// The bank interface was never opened this session, so its baseline is UNKNOWN.
 		f.seed(INVENTORY, SHARK, 20, DRAGON_BONES, 100);
-		assertTrue("bank must not have a baseline for this fixture", !f.bankSeen());
+		assertTrue("bank must not have a baseline for this fixture", !f.isSeeded(BANK));
 
 		f.menuClick("Deposit inventory", IFACE_BANK_DEPOSITBOX);
 		f.containerChanged(INVENTORY);
@@ -280,7 +280,7 @@ public class MovementResolverNegativeTest
 	public void grandExchangeInferenceDoesNotLeakToUnrelatedActions()
 	{
 		SnapshotFixtures f = new SnapshotFixtures();
-		f.seed(INVENTORY, COINS, 10_000_000);
+		f.loggedIn(COINS, 10_000_000);
 
 		f.worldClick("Drop");
 		f.containerChanged(INVENTORY);

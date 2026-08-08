@@ -27,7 +27,7 @@ public class MovementResolverPositiveTest
 	public void killDropAppearingInInventoryIsOneUnclassifiedGain()
 	{
 		SnapshotFixtures f = new SnapshotFixtures();
-		f.seed(INVENTORY, COINS, 1000);
+		f.loggedIn(COINS, 1000);
 
 		f.worldClick("Attack");
 		f.containerChanged(INVENTORY, COINS, 1000, ABYSSAL_WHIP, 1);
@@ -50,7 +50,7 @@ public class MovementResolverPositiveTest
 	public void consumableUsedUpIsOneUnclassifiedLoss()
 	{
 		SnapshotFixtures f = new SnapshotFixtures();
-		f.seed(INVENTORY, SHARK, 4, RUNE_ARROW, 500);
+		f.loggedIn(SHARK, 4, RUNE_ARROW, 500);
 
 		f.worldClick("Eat");
 		f.containerChanged(INVENTORY, SHARK, 3, RUNE_ARROW, 500);
@@ -73,7 +73,7 @@ public class MovementResolverPositiveTest
 	public void potionDoseConsumedIsALossOfTheFourDoseAndAGainOfTheThreeDose()
 	{
 		SnapshotFixtures f = new SnapshotFixtures();
-		f.seed(INVENTORY, SUPER_RESTORE_4, 1);
+		f.loggedIn(SUPER_RESTORE_4, 1);
 
 		f.worldClick("Drink");
 		f.containerChanged(INVENTORY, SUPER_RESTORE_3, 1);
@@ -141,7 +141,7 @@ public class MovementResolverPositiveTest
 	public void twoRealMovementsInOneTickAreBothReported()
 	{
 		SnapshotFixtures f = new SnapshotFixtures();
-		f.seed(INVENTORY, COINS, 1000, SHARK, 2);
+		f.loggedIn(COINS, 1000, SHARK, 2);
 
 		f.worldClick("Attack");
 		f.containerChanged(INVENTORY, COINS, 1500, SHARK, 1);

@@ -47,6 +47,23 @@ public class LedgerEvent
 	 * Resolved inside the death window opened by a PLAYER_DEATH event.
 	 */
 	public static final String FLAG_DEATH_WINDOW = "DEATH_WINDOW";
+	/**
+	 * A container this movement could plausibly have exchanged with had no baseline at the time,
+	 * so the other leg could not have appeared even if it happened. Accompanies UNVERIFIED.
+	 */
+	public static final String FLAG_COUNTERPARTY_UNSEEDED = "COUNTERPARTY_UNSEEDED";
+	/**
+	 * A movement in a container that can only change by transfer, with no counterpart leg
+	 * anywhere in the tick. The items came from or went to storage the spine does not track — a
+	 * rune pouch, a looting bag, a seed vault. Accompanies UNVERIFIED.
+	 */
+	public static final String FLAG_COUNTERPARTY_UNTRACKED = "COUNTERPARTY_UNTRACKED";
+	/**
+	 * The death window was still open when a state transition arrived, so the carried containers
+	 * kept their baselines instead of being reseeded. Without this the respawn region load
+	 * absorbs the entire wipe and no DEATH_LOSS is ever recorded.
+	 */
+	public static final String FLAG_DEATH_BASELINE_HELD = "DEATH_BASELINE_HELD";
 
 	int schemaVersion;
 	String sessionId;

@@ -50,7 +50,6 @@ public final class SnapshotFixtures
 	private ActionContext context = ActionContext.EMPTY;
 	private int tick = 100;
 	private long ts = 1_700_000_000_000L;
-	private boolean bankSeen;
 
 	public SnapshotFixtures()
 	{
@@ -90,9 +89,45 @@ public final class SnapshotFixtures
 		return ts;
 	}
 
-	public boolean bankSeen()
+	/**
+	 * Which containers currently have a baseline. Mirrors {@code TheLedgerPlugin.hasBaseline}.
+	 */
+	public MovementResolver.BaselineStatus baselines()
 	{
-		return bankSeen;
+		return containerId ->
+		{
+			ContainerSnapshot s = snapshots.get(containerId);
+			return s != null && s.isKnown();
+		};
+	}
+
+	public boolean isSeeded(int containerId)
+	{
+		return baselines().isSeeded(containerId);
+	}
+
+	/**
+	 * The state a normal logged-in account is in once {@code seedMissingBaselines} has run: the
+	 * inventory and equipment are readable immediately, the bank is not readable until its
+	 * interface has been opened.
+	 * <p>
+	 * Fixtures that are not specifically about unseeded containers should start from here. Before
+	 * this existed the fixtures seeded only what a scenario happened to touch, which is precisely
+	 * the asymmetry that produced one-legged phantoms in a real session.
+	 */
+	public SnapshotFixtures loggedIn(int... inventoryPairs)
+	{
+		seed(LedgerContainers.INVENTORY, inventoryPairs);
+		seed(LedgerContainers.EQUIPMENT);
+		return this;
+	}
+
+	/**
+	 * Mirrors {@code TheLedgerPlugin.seedMissingBaselines} for one container.
+	 */
+	public SnapshotFixtures eagerSeed(int containerId, int... rawItemIdQuantityPairs)
+	{
+		return seed(containerId, rawItemIdQuantityPairs);
 	}
 
 	public ContainerSnapshot snapshotOf(int containerId)
@@ -136,10 +171,6 @@ public final class SnapshotFixtures
 		ContainerSnapshot next = ContainerSnapshot.fromRaw(containerId, ids, qtys, canonicalizer);
 		buffer.addAll(ContainerDiffer.diff(snapshotOf(containerId), next));
 		snapshots.put(containerId, next);
-		if (containerId == LedgerContainers.BANK)
-		{
-			bankSeen = true;
-		}
 		return this;
 	}
 
@@ -175,7 +206,7 @@ public final class SnapshotFixtures
 	 */
 	public List<LedgerEvent> gameTick()
 	{
-		List<LedgerEvent> events = resolver.resolveTick(tick, ts, buffer.drain(), context, bankSeen);
+		List<LedgerEvent> events = resolver.resolveTick(tick, ts, buffer.drain(), context, baselines());
 		all.addAll(events);
 		advanceTick();
 		return events;
@@ -186,12 +217,22 @@ public final class SnapshotFixtures
 	 */
 	public LedgerEvent stateReset(String reason)
 	{
-		buffer.clear();
+		// Mirrors TheLedgerPlugin.invalidateBaselines, including the death exception: a death
+		// causes a respawn region load, so reseeding the carried containers there would absorb the
+		// entire wipe.
+		boolean deathPending = resolver.isInDeathWindow(tick);
+		if (!deathPending)
+		{
+			buffer.clear();
+		}
 		for (Integer containerId : new ArrayList<>(snapshots.keySet()))
 		{
+			if (deathPending && LedgerContainers.isCarried(containerId))
+			{
+				continue;
+			}
 			snapshots.put(containerId, ContainerSnapshot.unknown(containerId));
 		}
-		bankSeen = false;
 		context = ActionContext.EMPTY;
 		LedgerEvent event = resolver.recordStateReset(tick, ts, reason);
 		all.add(event);

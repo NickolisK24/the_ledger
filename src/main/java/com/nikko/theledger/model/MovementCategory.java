@@ -28,6 +28,19 @@ public enum MovementCategory
 	 * A decrease the spine cannot yet attribute to a cause.
 	 */
 	UNCLASSIFIED_LOSS,
+	/**
+	 * A movement that was observed but cannot be trusted as a gain or a loss, because the
+	 * container it must have exchanged with was not visible at the time.
+	 * <p>
+	 * This is not a weaker UNCLASSIFIED. It is a statement that the spine saw one leg of what was
+	 * probably a transfer and could not see the other, so counting it as wealth appearing or
+	 * disappearing would fabricate it. The reason is in the flags. <b>Phase 2 must exclude these
+	 * from cost accounting rather than treating them as unattributed revenue or expense.</b>
+	 * <p>
+	 * The sign is still carried in {@code qty}, so the direction survives for anything that later
+	 * learns how to resolve the missing side.
+	 */
+	UNVERIFIED,
 
 	// ---- Reserved for Phase 2. Declared for schema stability, never assigned in Phase 1. ----
 
