@@ -5,6 +5,7 @@ import com.nikko.theledger.model.EventType;
 import com.nikko.theledger.model.LedgerEvent;
 import com.nikko.theledger.model.MovementCategory;
 import java.awt.BorderLayout;
+import java.awt.Dimension;
 import java.awt.Font;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -12,11 +13,18 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.swing.JCheckBox;
+import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JScrollBar;
+import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
+import javax.swing.ScrollPaneConstants;
+import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.border.EmptyBorder;
+import javax.swing.text.DefaultCaret;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.PluginPanel;
 
@@ -36,6 +44,12 @@ public class LedgerDebugPanel extends PluginPanel
 {
 	private static final int RECENT_LIMIT = 50;
 	private static final Font MONO = new Font(Font.MONOSPACED, Font.PLAIN, 11);
+	/**
+	 * How close to the bottom still counts as "at the bottom". A scrollbar rarely lands exactly on
+	 * its maximum after a relayout, so an exact comparison would drop out of follow on its own.
+	 */
+	private static final int STICKY_TOLERANCE_PX = 8;
+	private static final Dimension EVENT_LIST_SIZE = new Dimension(PANEL_WIDTH - 16, 220);
 
 	private final AtomicInteger[] typeCounts = newCounters(EventType.values().length);
 	private final AtomicInteger[] categoryCounts = newCounters(MovementCategory.values().length);
@@ -63,7 +77,22 @@ public class LedgerDebugPanel extends PluginPanel
 	private final JTextArea counterArea = area();
 	private final JTextArea containerArea = area();
 	private final JTextArea recentArea = area();
+	/**
+	 * The event list gets a viewport of its own rather than sharing the panel's. Everything else
+	 * stays live and visible while it is scrolled, and its position is not at the mercy of the
+	 * other three areas being rewritten.
+	 */
+	private final JScrollPane recentScroll = new JScrollPane(recentArea);
+	private final JCheckBox followToggle = new JCheckBox("Follow", true);
+	private final JLabel followState = new JLabel();
 	private final Timer refresh;
+
+	/**
+	 * Bumped whenever the event list changes, so a render that has nothing new to show leaves the
+	 * document — and therefore the scroll position — completely alone.
+	 */
+	private final AtomicInteger revision = new AtomicInteger();
+	private int renderedRevision = -1;
 
 	public LedgerDebugPanel()
 	{
@@ -73,7 +102,7 @@ public class LedgerDebugPanel extends PluginPanel
 		add(section("Session", statusArea));
 		add(section("Counters", counterArea));
 		add(section("Containers seen", containerArea));
-		add(section("Last " + RECENT_LIMIT + " events", recentArea));
+		add(eventSection());
 
 		refresh = new Timer(1000, e -> render());
 		refresh.setRepeats(true);
@@ -99,12 +128,15 @@ public class LedgerDebugPanel extends PluginPanel
 		}
 		synchronized (recent)
 		{
-			recent.addFirst(summarise(event, queued));
+			// Newest last. A log reads oldest-to-newest, which is what makes following the bottom
+			// the right behaviour rather than an arbitrary one.
+			recent.addLast(summarise(event, queued));
 			while (recent.size() > RECENT_LIMIT)
 			{
-				recent.removeLast();
+				recent.removeFirst();
 			}
 		}
+		revision.incrementAndGet();
 	}
 
 	/**
@@ -181,6 +213,7 @@ public class LedgerDebugPanel extends PluginPanel
 		{
 			recent.clear();
 		}
+		revision.incrementAndGet();
 		setSession(null, null);
 		setWriterStats(0, 0, 0, 0, null);
 	}
@@ -251,6 +284,35 @@ public class LedgerDebugPanel extends PluginPanel
 		}
 		containerArea.setText(containers.toString().trim());
 
+		renderEventList();
+		updateFollowState();
+
+		revalidate();
+		repaint();
+	}
+
+	/**
+	 * Rewrites the event list without stealing the viewport.
+	 * <p>
+	 * Sticky follow, the standard log-viewer behaviour: note whether the scrollbar was already at
+	 * the bottom, replace the text, and only jump to the bottom if it was. Scroll up and the panel
+	 * leaves the viewport exactly where it was put, while every counter above keeps updating.
+	 * <p>
+	 * EDT only — the Swing timer fires here and nothing else touches these components.
+	 */
+	private void renderEventList()
+	{
+		int currentRevision = revision.get();
+		if (currentRevision == renderedRevision)
+		{
+			// Nothing new. Rewriting an identical document would relayout the viewport for no
+			// reason, which is its own source of scroll drift.
+			return;
+		}
+
+		JScrollBar bar = recentScroll.getVerticalScrollBar();
+		boolean wasAtBottom = isAtBottom(bar);
+
 		StringBuilder recentText = new StringBuilder();
 		synchronized (recent)
 		{
@@ -267,9 +329,45 @@ public class LedgerDebugPanel extends PluginPanel
 			}
 		}
 		recentArea.setText(recentText.toString().trim());
+		renderedRevision = currentRevision;
 
-		revalidate();
-		repaint();
+		if (followToggle.isSelected() && wasAtBottom)
+		{
+			// After the document change has been laid out, or the maximum is still the old one.
+			SwingUtilities.invokeLater(() ->
+			{
+				bar.setValue(bar.getMaximum() - bar.getVisibleAmount());
+				updateFollowState();
+			});
+		}
+	}
+
+	private static boolean isAtBottom(JScrollBar bar)
+	{
+		return bar.getValue() + bar.getVisibleAmount() >= bar.getMaximum() - STICKY_TOLERANCE_PX;
+	}
+
+	/**
+	 * Says why the list is not moving, so a deliberately pinned view is never mistaken for a
+	 * frozen panel.
+	 */
+	private void updateFollowState()
+	{
+		if (!followToggle.isSelected())
+		{
+			followState.setText("off");
+			followState.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		}
+		else if (isAtBottom(recentScroll.getVerticalScrollBar()))
+		{
+			followState.setText("live");
+			followState.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
+		}
+		else
+		{
+			followState.setText("paused, scrolled up");
+			followState.setForeground(ColorScheme.BRAND_ORANGE);
+		}
 	}
 
 	private static String summarise(LedgerEvent event, boolean queued)
@@ -349,7 +447,48 @@ public class LedgerDebugPanel extends PluginPanel
 		return label;
 	}
 
-	private static JPanel section(String title, JTextArea body)
+	/**
+	 * The event list, its own scroll pane, and the follow controls.
+	 */
+	private JPanel eventSection()
+	{
+		recentScroll.setPreferredSize(EVENT_LIST_SIZE);
+		recentScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+		recentScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+		recentScroll.setBorder(null);
+		recentScroll.getViewport().setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		// Keep the indicator honest the moment the user drags, not a second later.
+		recentScroll.getVerticalScrollBar().addAdjustmentListener(e -> updateFollowState());
+
+		followToggle.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		followToggle.setForeground(ColorScheme.TEXT_COLOR);
+		followToggle.setFocusable(false);
+		followToggle.setToolTipText("Follow new events. Turns itself off while you scroll up, "
+			+ "and resumes when you scroll back to the bottom.");
+		followToggle.addActionListener(e ->
+		{
+			if (followToggle.isSelected())
+			{
+				JScrollBar bar = recentScroll.getVerticalScrollBar();
+				bar.setValue(bar.getMaximum() - bar.getVisibleAmount());
+			}
+			updateFollowState();
+		});
+
+		followState.setFont(MONO);
+
+		JPanel controls = new JPanel(new BorderLayout());
+		controls.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		controls.add(followToggle, BorderLayout.WEST);
+		controls.add(followState, BorderLayout.EAST);
+
+		JPanel panel = section("Last " + RECENT_LIMIT + " events", recentScroll);
+		panel.add(controls, BorderLayout.SOUTH);
+		updateFollowState();
+		return panel;
+	}
+
+	private static JPanel section(String title, JComponent body)
 	{
 		JPanel panel = new JPanel(new BorderLayout());
 		panel.setBackground(ColorScheme.DARKER_GRAY_COLOR);
@@ -368,6 +507,12 @@ public class LedgerDebugPanel extends PluginPanel
 	{
 		JTextArea a = new JTextArea();
 		a.setEditable(false);
+		// A DefaultCaret on ALWAYS_UPDATE drags its viewport on every setText. With four areas
+		// sharing the panel's scroll pane, that is what made the whole panel snap while reading.
+		if (a.getCaret() instanceof DefaultCaret)
+		{
+			((DefaultCaret) a.getCaret()).setUpdatePolicy(DefaultCaret.NEVER_UPDATE);
+		}
 		a.setLineWrap(true);
 		a.setWrapStyleWord(false);
 		a.setFont(MONO);
