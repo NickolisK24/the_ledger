@@ -272,6 +272,12 @@ public class TheLedgerPlugin extends Plugin
 	{
 		// Before anything is classified, give every container without a baseline a chance to get
 		// one by reading it directly rather than waiting for it to change.
+		// Before any early return. This is the last tick the plugin has SEEN, which is what the
+		// footer needs; assigning it further down made it the last tick that happened to resolve a
+		// movement, so a session ending in lifecycle events wrote a footer whose tick went
+		// backwards past the events preceding it.
+		lastTick = client.getTickCount();
+
 		seedMissingBaselines();
 
 		if (panel != null && resolver != null)
@@ -294,8 +300,7 @@ public class TheLedgerPlugin extends Plugin
 			return;
 		}
 
-		int tick = client.getTickCount();
-		lastTick = tick;
+		int tick = lastTick;
 		long ts = System.currentTimeMillis();
 		List<LedgerEvent> events = resolver.resolveTick(tick, ts, tickBuffer.drain(),
 			lastAction, this::hasBaseline);
