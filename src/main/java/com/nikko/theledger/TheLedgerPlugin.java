@@ -20,6 +20,7 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -42,6 +43,7 @@ import net.runelite.client.RuneLite;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ClientShutdown;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
@@ -133,6 +135,10 @@ public class TheLedgerPlugin extends Plugin
 
 	private ActionContext lastAction = ActionContext.EMPTY;
 	/**
+	 * Last tick seen, cached because the shutdown path runs off the client thread.
+	 */
+	private volatile int lastTick;
+	/**
 	 * The state we came from, which is what separates a region change from a repopulation.
 	 */
 	private GameState previousGameState = GameState.UNKNOWN;
@@ -172,6 +178,7 @@ public class TheLedgerPlugin extends Plugin
 			if (client.getGameState() == GameState.LOGGED_IN)
 			{
 				ensureSession();
+				seedMissingBaselines();
 			}
 		});
 	}
@@ -288,6 +295,7 @@ public class TheLedgerPlugin extends Plugin
 		}
 
 		int tick = client.getTickCount();
+		lastTick = tick;
 		long ts = System.currentTimeMillis();
 		List<LedgerEvent> events = resolver.resolveTick(tick, ts, tickBuffer.drain(),
 			lastAction, this::hasBaseline);
@@ -353,6 +361,30 @@ public class TheLedgerPlugin extends Plugin
 		emit(resolver.recordDeath(client.getTickCount(), System.currentTimeMillis()));
 	}
 
+	/**
+	 * The path a closed window actually takes.
+	 * <p>
+	 * Closing the client does <b>not</b> call {@link #shutDown()}. RuneLite's window listener
+	 * posts {@link ClientShutdown} and then races a ten second timer to {@code System.exit}, so a
+	 * plugin that only writes its footer in shutDown never writes one at all — which is exactly
+	 * what three consecutive real sessions showed.
+	 * <p>
+	 * {@code ClientShutdown.waitFor} is the supported way to make that wait deterministic instead
+	 * of opportunistic: the work is submitted to the already-injected executor, and the client
+	 * blocks on the returned Future up to its own bounded timeout. No shutdown hook, no thread of
+	 * our own, nothing that outlives the client, and the client thread is never blocked.
+	 */
+	@Subscribe
+	public void onClientShutdown(ClientShutdown event)
+	{
+		if (sessionManager == null || !sessionManager.isActive())
+		{
+			return;
+		}
+		Future<?> finished = executor.submit(() -> endSession("clientShutdown"));
+		event.waitFor(finished);
+	}
+
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
@@ -387,6 +419,10 @@ public class TheLedgerPlugin extends Plugin
 		if (state == GameState.LOGGED_IN)
 		{
 			ensureSession();
+			// Immediately, not on the next tick. Equipment only fires ItemContainerChanged when it
+			// changes, so a session with no gear swap would otherwise leave it UNKNOWN forever and
+			// flag every single inventory movement as uncorroborated.
+			seedMissingBaselines();
 		}
 	}
 
@@ -453,26 +489,20 @@ public class TheLedgerPlugin extends Plugin
 		{
 			return;
 		}
-		if (resolver != null && writer != null)
+		if (writer != null)
 		{
-			// SESSION_END is best effort. Its absence in a file is how a crash is recognised.
-			// It carries the drop total so a consumer can exclude a compromised session instead
-			// of computing rates over a hole it cannot see. Drops during the final drain that
-			// follows are not in this figure; the DATA_LOSS marker still records that they
-			// happened.
-			writer.enqueue(LedgerEvent.builder()
+			// The footer bypasses the queue, so a full queue cannot eat the one line that
+			// distinguishes a clean exit from a crash. Drops during the final drain are not in
+			// this figure; the DATA_LOSS marker still records that they happened.
+			writer.close(resolver == null ? null : LedgerEvent.builder()
 				.schemaVersion(LedgerEvent.SCHEMA_VERSION)
 				.sessionId(sessionManager.getSessionId())
 				.ts(System.currentTimeMillis())
-				.tick(client.getTickCount())
+				.tick(lastTick)
 				.type(EventType.SESSION_END)
 				.droppedEvents(writer.getDroppedCount())
 				.actionContext(reason)
 				.build());
-		}
-		if (writer != null)
-		{
-			writer.close();
 			writer = null;
 		}
 		sessionManager.end();

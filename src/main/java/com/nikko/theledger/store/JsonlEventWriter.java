@@ -212,12 +212,43 @@ public final class JsonlEventWriter implements Closeable
 	@Override
 	public void close()
 	{
+		close(null);
+	}
+
+	/**
+	 * Drains, writes a final line, and closes.
+	 * <p>
+	 * The footer bypasses the queue entirely. Enqueueing it would make the one line that says
+	 * "this session ended cleanly" the first casualty of a full queue — and a missing footer is
+	 * indistinguishable from a crash, so the session would be permanently unreadable as clean
+	 * precisely when it most needed explaining. It is written directly, under the same lock, after
+	 * everything else has gone out.
+	 *
+	 * @param footer the SESSION_END line, or null to close without one.
+	 */
+	public void close(LedgerEvent footer)
+	{
 		drain();
 		synchronized (writeLock)
 		{
 			if (closed)
 			{
 				return;
+			}
+			if (footer != null)
+			{
+				try
+				{
+					ensureOpen();
+					out.write(serialize(footer));
+					out.write('\n');
+					written.incrementAndGet();
+				}
+				catch (IOException e)
+				{
+					errors.incrementAndGet();
+					lastError = e.getClass().getSimpleName() + ": " + e.getMessage();
+				}
 			}
 			closed = true;
 			if (out != null)

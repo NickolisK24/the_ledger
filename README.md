@@ -101,8 +101,18 @@ Transfer netting needs *both* sides seeded, and nothing used to check that preco
 
 Two things now prevent it:
 
-1. **Containers are seeded eagerly.** Every tick, any tracked container without a baseline is
-   read directly with `getItemContainer` instead of waiting for it to change. Equipment often
+1. **Containers are seeded eagerly** — at `startUp`, on reaching `LOGGED_IN`, and as a per-tick
+   backstop — by reading each one directly with `getItemContainer` instead of waiting for it to
+   change.
+
+   **This is not an optimisation, it is the fix for a defect that made the flag useless.**
+   Equipment only fires `ItemContainerChanged` when it *changes*, so a session with no gear swap
+   left it `UNKNOWN` from login to logout. A real session recorded container 94 exactly zero
+   times, and as a result **22 of 22 unclassified losses were flagged** — every one of them rune
+   consumption from casting teleports. A consumed rune is destroyed; there is no counterpart and
+   never was, so "uncorroborated" was the wrong claim about what will be the largest cost
+   category in Phase 2. Seeding at login means `COUNTERPARTY_UNSEEDED` describes a genuine
+   startup race again, not the steady state. Equipment often
    does not change for a long time, so waiting left it `UNKNOWN` while the inventory and bank were
    live — that asymmetry is the bug, and reading removes it at the source. The bank returns null
    until its interface is opened, which is correct: it genuinely has nothing to know yet.
@@ -394,7 +404,12 @@ repopulation — and those states have already invalidated the baselines on thei
 before `LOADING` is ever reached.
 
 So the discrimination is on the **previous** state, and it ships behind a config toggle,
-**"Keep baselines across region loads", default off**:
+**"Keep baselines across region loads", now default ON.**
+
+**Confirmed against a live session:** with the toggle on, **11 teleports produced zero
+`STATE_RESET` events and zero unflagged `UNCLASSIFIED_GAIN`.** Containers do not repopulate on a
+region change. The toggle stays so the old behaviour can be restored, but the hypothesis is no
+longer a hypothesis.
 
 | | Toggle OFF (default, current) | Toggle ON (experimental) |
 | --- | --- | --- |
@@ -403,8 +418,7 @@ So the discrimination is on the **previous** state, and it ships behind a config
 | Movement right after a teleport | absorbed | logged |
 | Death through the respawn load | works | works |
 
-**This is a hypothesis about client behaviour, not a verified fact**, which is why it defaults
-off. What to compare in the panel across two sessions of similar length and activity:
+What to compare in the panel if you ever want to re-test it:
 
 | Panel line | Toggle OFF | Toggle ON | Meaning |
 | --- | --- | --- | --- |
@@ -414,10 +428,7 @@ off. What to compare in the panel across two sessions of similar length and acti
 | `reseeds` | climbs with resets | near zero after startup | absorbed movements |
 | `UNCLASSIFIED_GAIN` unflagged | some | **must not increase** | **the pass/fail test** |
 
-**The test that matters is the last row.** Teleport repeatedly and watch for unexplained gains.
-If any appear — especially a burst matching an inventory's worth of items right after a
-teleport — the hypothesis is wrong, containers *do* repopulate on a region change, and the
-toggle goes back off. Everything else is a bonus; that row is the verdict.
+**The last row is the verdict**, and in the confirming session it was zero.
 
 Death does not depend on the setting either way: the carried containers hold their baselines
 through a respawn regardless, and on the experimental path an open death window is pushed back
@@ -514,6 +525,30 @@ The same applies to anything else arriving transitively. The local test harness 
 versions the client actually resolves — Gson 2.8.5, JUnit 4.12 — and the pin is verified with the
 command above rather than assumed. A test environment more permissive than production will
 certify code that cannot run.
+
+### Closing the client does not call `shutDown()`
+
+`Plugin.shutDown()` is called when a plugin is disabled. It is **not** called when the client
+window is closed. RuneLite's window listener posts a `ClientShutdown` event and then starts a
+thread that waits up to ten seconds for registered consumers, calls `stopNow()`, and exits.
+
+Three consecutive real sessions therefore had no `SESSION_END`, which disabled two of the three
+integrity mechanisms at once: `isTruncated()` was permanently true so it could not distinguish a
+crash from a clean exit, and `getDroppedEvents()` was permanently null because the total is only
+recorded on the footer.
+
+The footer is now written from a `ClientShutdown` subscriber: the work is submitted to the
+already-injected executor and the returned `Future` is handed to `ClientShutdown.waitFor`, so the
+client blocks on it under its own bounded timeout. Deterministic rather than opportunistic, no
+shutdown hook, no thread of our own, nothing that outlives the client, and the client thread is
+never blocked.
+
+**The footer also bypasses the write queue.** Enqueueing it made the one line that says "this
+session ended cleanly" the first casualty of a full queue — so a compromised session was also
+permanently unreadable as clean, exactly when it most needed explaining. It is written directly
+under the writer's lock after everything else has gone out.
+
+**To verify on a real file:** the last line is a `SESSION_END` carrying a `droppedEvents` field.
 
 ### Commit signing
 
