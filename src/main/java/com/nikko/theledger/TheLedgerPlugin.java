@@ -680,7 +680,10 @@ public class TheLedgerPlugin extends Plugin
 		{
 			return composition.getLinkedNoteId();
 		}
-		return itemId;
+		// Last, exactly where ItemManager.canonicalize consults its own copy: some items carry a
+		// different id when worn than when carried, so without this a graceful hood coming off is
+		// one item destroyed and a different one created.
+		return WornItemIds.canonical(itemId);
 	}
 
 	private String worldTypeString()

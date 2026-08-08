@@ -340,6 +340,29 @@ only change by transfer. That contains the damage without pretending to explain 
 **Rune pouch support is a Phase 2 blocker, not a nice-to-have** — until it lands those quantities
 are recorded but unattributable, and Phase 2 must exclude them rather than price them.
 
+#### Worn items carry different ids
+
+Some items have one id in the inventory and a different one when worn — all graceful including
+every recolour, penance gloves, boots of lightness. Without a mapping, taking a piece of graceful
+off logs as one item destroyed in the equipment and a different item created in the inventory:
+two real-looking events for a movement that changed nothing, and one that transfer netting cannot
+match because the ids differ.
+
+`WornItemIds` carries that mapping, **87 entries mirroring
+`net.runelite.client.game.ItemManager.WORN_ITEMS`**. RuneLite maintains that table for exactly
+this reason, so:
+
+> **This table must be reviewed whenever RuneLite changes `WORN_ITEMS` upstream.** It is a copy,
+> not a reference, and a copy goes stale silently. `WornItemIdsTest.tableIsTheExpectedSize` is
+> the tripwire for a merge truncating it, but only upstream review catches an *added* entry.
+
+It lives in the RuneLite-facing layer beside the plugin, **not in `capture`** — that package's
+whole value is that it imports nothing from the client, and this table is nothing but client
+constants. It is written with named `gameval.ItemID` constants rather than bare integers so an
+entry can be checked against upstream by eye. The `Canonicalizer` seam and its cache are
+unchanged: the table is consulted from the plugin's implementation of that seam, as the last
+step, exactly where `ItemManager.canonicalize` consults its own copy.
+
 #### The blind spot in `COUNTERPARTY_UNTRACKED`, and its direction
 
 This flag is not a clean signal. **On a bank GAIN it conflates two populations that look

@@ -1,0 +1,169 @@
+package com.nikko.theledger;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import net.runelite.api.gameval.ItemID;
+
+/**
+ * Items whose worn form carries a different id from the one they have in the inventory.
+ * <p>
+ * <b>This table mirrors {@code net.runelite.client.game.ItemManager.WORN_ITEMS} and must be
+ * reviewed whenever RuneLite changes that table upstream.</b> RuneLite maintains it precisely
+ * because these worn forms use different ids; without the same mapping, taking a piece of
+ * graceful off logs as one item destroyed in the equipment and a different item created in the
+ * inventory, and equipping it logs the reverse. Both legs are real, both are wrong, and transfer
+ * netting cannot match them because the ids differ.
+ * <p>
+ * It lives here, in the RuneLite-facing layer, rather than in {@code capture} — the whole point
+ * of that package is that it imports nothing from the client, and this table is nothing but
+ * client constants. The {@code Canonicalizer} seam and its cache are unchanged: this is consulted
+ * from the plugin's implementation of that seam, as the last step, exactly where
+ * {@code ItemManager.canonicalize} consults its own copy.
+ * <p>
+ * Named constants rather than bare integers so a reader can check an entry against upstream
+ * without looking anything up. Regenerate rather than hand-edit if the upstream table moves.
+ */
+public final class WornItemIds
+{
+	private static final Map<Integer, Integer> WORN_TO_BASE = build();
+
+	/**
+	 * @return the inventory-form id for a worn variant, or {@code itemId} unchanged if it is not
+	 * one. Total, and safe for any id.
+	 */
+	public static int canonical(int itemId)
+	{
+		Integer base = WORN_TO_BASE.get(itemId);
+		return base == null ? itemId : base;
+	}
+
+	public static boolean isWornVariant(int itemId)
+	{
+		return WORN_TO_BASE.containsKey(itemId);
+	}
+
+	/**
+	 * Entry count, so a fixture can notice the table being truncated by a bad merge.
+	 */
+	public static int size()
+	{
+		return WORN_TO_BASE.size();
+	}
+
+	private static Map<Integer, Integer> build()
+	{
+		Map<Integer, Integer> m = new HashMap<>(128);
+
+		put(m, ItemID.IKOV_BOOTSOFLIGHTNESSWORN, ItemID.IKOV_BOOTSOFLIGHTNESS);
+
+		put(m, ItemID.BARBASSAULT_PENANCE_GLOVES_WORN, ItemID.BARBASSAULT_PENANCE_GLOVES);
+
+		put(m, ItemID.GRACEFUL_HOOD_WORN, ItemID.GRACEFUL_HOOD);
+		put(m, ItemID.GRACEFUL_CAPE_WORN, ItemID.GRACEFUL_CAPE);
+		put(m, ItemID.GRACEFUL_TOP_WORN, ItemID.GRACEFUL_TOP);
+		put(m, ItemID.GRACEFUL_LEGS_WORN, ItemID.GRACEFUL_LEGS);
+		put(m, ItemID.GRACEFUL_GLOVES_WORN, ItemID.GRACEFUL_GLOVES);
+		put(m, ItemID.GRACEFUL_BOOTS_WORN, ItemID.GRACEFUL_BOOTS);
+
+		put(m, ItemID.ZEAH_GRACEFUL_HOOD_ARCEUUS_WORN, ItemID.ZEAH_GRACEFUL_HOOD_ARCEUUS);
+		put(m, ItemID.ZEAH_GRACEFUL_CAPE_ARCEUUS_WORN, ItemID.ZEAH_GRACEFUL_CAPE_ARCEUUS);
+		put(m, ItemID.ZEAH_GRACEFUL_TOP_ARCEUUS_WORN, ItemID.ZEAH_GRACEFUL_TOP_ARCEUUS);
+		put(m, ItemID.ZEAH_GRACEFUL_LEGS_ARCEUUS_WORN, ItemID.ZEAH_GRACEFUL_LEGS_ARCEUUS);
+		put(m, ItemID.ZEAH_GRACEFUL_GLOVES_ARCEUUS_WORN, ItemID.ZEAH_GRACEFUL_GLOVES_ARCEUUS);
+		put(m, ItemID.ZEAH_GRACEFUL_BOOTS_ARCEUUS_WORN, ItemID.ZEAH_GRACEFUL_BOOTS_ARCEUUS);
+		put(m, ItemID.ZEAH_GRACEFUL_HOOD_PISCARILIUS_WORN, ItemID.ZEAH_GRACEFUL_HOOD_PISCARILIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_CAPE_PISCARILIUS_WORN, ItemID.ZEAH_GRACEFUL_CAPE_PISCARILIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_TOP_PISCARILIUS_WORN, ItemID.ZEAH_GRACEFUL_TOP_PISCARILIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_LEGS_PISCARILIUS_WORN, ItemID.ZEAH_GRACEFUL_LEGS_PISCARILIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_GLOVES_PISCARILIUS_WORN, ItemID.ZEAH_GRACEFUL_GLOVES_PISCARILIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_BOOTS_PISCARILIUS_WORN, ItemID.ZEAH_GRACEFUL_BOOTS_PISCARILIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_HOOD_LOVAKENGJ_WORN, ItemID.ZEAH_GRACEFUL_HOOD_LOVAKENGJ);
+		put(m, ItemID.ZEAH_GRACEFUL_CAPE_LOVAKENGJ_WORN, ItemID.ZEAH_GRACEFUL_CAPE_LOVAKENGJ);
+		put(m, ItemID.ZEAH_GRACEFUL_TOP_LOVAKENGJ_WORN, ItemID.ZEAH_GRACEFUL_TOP_LOVAKENGJ);
+		put(m, ItemID.ZEAH_GRACEFUL_LEGS_LOVAKENGJ_WORN, ItemID.ZEAH_GRACEFUL_LEGS_LOVAKENGJ);
+		put(m, ItemID.ZEAH_GRACEFUL_GLOVES_LOVAKENGJ_WORN, ItemID.ZEAH_GRACEFUL_GLOVES_LOVAKENGJ);
+		put(m, ItemID.ZEAH_GRACEFUL_BOOTS_LOVAKENGJ_WORN, ItemID.ZEAH_GRACEFUL_BOOTS_LOVAKENGJ);
+		put(m, ItemID.ZEAH_GRACEFUL_HOOD_SHAYZIEN_WORN, ItemID.ZEAH_GRACEFUL_HOOD_SHAYZIEN);
+		put(m, ItemID.ZEAH_GRACEFUL_CAPE_SHAYZIEN_WORN, ItemID.ZEAH_GRACEFUL_CAPE_SHAYZIEN);
+		put(m, ItemID.ZEAH_GRACEFUL_TOP_SHAYZIEN_WORN, ItemID.ZEAH_GRACEFUL_TOP_SHAYZIEN);
+		put(m, ItemID.ZEAH_GRACEFUL_LEGS_SHAYZIEN_WORN, ItemID.ZEAH_GRACEFUL_LEGS_SHAYZIEN);
+		put(m, ItemID.ZEAH_GRACEFUL_GLOVES_SHAYZIEN_WORN, ItemID.ZEAH_GRACEFUL_GLOVES_SHAYZIEN);
+		put(m, ItemID.ZEAH_GRACEFUL_BOOTS_SHAYZIEN_WORN, ItemID.ZEAH_GRACEFUL_BOOTS_SHAYZIEN);
+		put(m, ItemID.ZEAH_GRACEFUL_HOOD_HOSIDIUS_WORN, ItemID.ZEAH_GRACEFUL_HOOD_HOSIDIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_CAPE_HOSIDIUS_WORN, ItemID.ZEAH_GRACEFUL_CAPE_HOSIDIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_TOP_HOSIDIUS_WORN, ItemID.ZEAH_GRACEFUL_TOP_HOSIDIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_LEGS_HOSIDIUS_WORN, ItemID.ZEAH_GRACEFUL_LEGS_HOSIDIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_GLOVES_HOSIDIUS_WORN, ItemID.ZEAH_GRACEFUL_GLOVES_HOSIDIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_BOOTS_HOSIDIUS_WORN, ItemID.ZEAH_GRACEFUL_BOOTS_HOSIDIUS);
+		put(m, ItemID.ZEAH_GRACEFUL_HOOD_KOUREND_WORN, ItemID.ZEAH_GRACEFUL_HOOD_KOUREND);
+		put(m, ItemID.ZEAH_GRACEFUL_CAPE_KOUREND_WORN, ItemID.ZEAH_GRACEFUL_CAPE_KOUREND);
+		put(m, ItemID.ZEAH_GRACEFUL_TOP_KOUREND_WORN, ItemID.ZEAH_GRACEFUL_TOP_KOUREND);
+		put(m, ItemID.ZEAH_GRACEFUL_LEGS_KOUREND_WORN, ItemID.ZEAH_GRACEFUL_LEGS_KOUREND);
+		put(m, ItemID.ZEAH_GRACEFUL_GLOVES_KOUREND_WORN, ItemID.ZEAH_GRACEFUL_GLOVES_KOUREND);
+		put(m, ItemID.ZEAH_GRACEFUL_BOOTS_KOUREND_WORN, ItemID.ZEAH_GRACEFUL_BOOTS_KOUREND);
+
+		put(m, ItemID.GRACEFUL_HOOD_SKILLCAPECOLOUR_WORN, ItemID.GRACEFUL_HOOD_SKILLCAPECOLOUR);
+		put(m, ItemID.GRACEFUL_CAPE_SKILLCAPECOLOUR_WORN, ItemID.GRACEFUL_CAPE_SKILLCAPECOLOUR);
+		put(m, ItemID.GRACEFUL_TOP_SKILLCAPECOLOUR_WORN, ItemID.GRACEFUL_TOP_SKILLCAPECOLOUR);
+		put(m, ItemID.GRACEFUL_LEGS_SKILLCAPECOLOUR_WORN, ItemID.GRACEFUL_LEGS_SKILLCAPECOLOUR);
+		put(m, ItemID.GRACEFUL_GLOVES_SKILLCAPECOLOUR_WORN, ItemID.GRACEFUL_GLOVES_SKILLCAPECOLOUR);
+		put(m, ItemID.GRACEFUL_BOOTS_SKILLCAPECOLOUR_WORN, ItemID.GRACEFUL_BOOTS_SKILLCAPECOLOUR);
+		put(m, ItemID.GRACEFUL_HOOD_HALLOWED_WORN, ItemID.GRACEFUL_HOOD_HALLOWED);
+		put(m, ItemID.GRACEFUL_CAPE_HALLOWED_WORN, ItemID.GRACEFUL_CAPE_HALLOWED);
+		put(m, ItemID.GRACEFUL_TOP_HALLOWED_WORN, ItemID.GRACEFUL_TOP_HALLOWED);
+		put(m, ItemID.GRACEFUL_LEGS_HALLOWED_WORN, ItemID.GRACEFUL_LEGS_HALLOWED);
+		put(m, ItemID.GRACEFUL_GLOVES_HALLOWED_WORN, ItemID.GRACEFUL_GLOVES_HALLOWED);
+		put(m, ItemID.GRACEFUL_BOOTS_HALLOWED_WORN, ItemID.GRACEFUL_BOOTS_HALLOWED);
+		put(m, ItemID.GRACEFUL_HOOD_TRAILBLAZER_WORN, ItemID.GRACEFUL_HOOD_TRAILBLAZER);
+		put(m, ItemID.GRACEFUL_CAPE_TRAILBLAZER_WORN, ItemID.GRACEFUL_CAPE_TRAILBLAZER);
+		put(m, ItemID.GRACEFUL_TOP_TRAILBLAZER_WORN, ItemID.GRACEFUL_TOP_TRAILBLAZER);
+		put(m, ItemID.GRACEFUL_LEGS_TRAILBLAZER_WORN, ItemID.GRACEFUL_LEGS_TRAILBLAZER);
+		put(m, ItemID.GRACEFUL_GLOVES_TRAILBLAZER_WORN, ItemID.GRACEFUL_GLOVES_TRAILBLAZER);
+		put(m, ItemID.GRACEFUL_BOOTS_TRAILBLAZER_WORN, ItemID.GRACEFUL_BOOTS_TRAILBLAZER);
+		put(m, ItemID.GRACEFUL_HOOD_ADVENTURER_WORN, ItemID.GRACEFUL_HOOD_ADVENTURER);
+		put(m, ItemID.GRACEFUL_CAPE_ADVENTURER_WORN, ItemID.GRACEFUL_CAPE_ADVENTURER);
+		put(m, ItemID.GRACEFUL_TOP_ADVENTURER_WORN, ItemID.GRACEFUL_TOP_ADVENTURER);
+		put(m, ItemID.GRACEFUL_LEGS_ADVENTURER_WORN, ItemID.GRACEFUL_LEGS_ADVENTURER);
+		put(m, ItemID.GRACEFUL_GLOVES_ADVENTURER_WORN, ItemID.GRACEFUL_GLOVES_ADVENTURER);
+		put(m, ItemID.GRACEFUL_BOOTS_ADVENTURER_WORN, ItemID.GRACEFUL_BOOTS_ADVENTURER);
+		put(m, ItemID.GRACEFUL_HOOD_WYRM_WORN, ItemID.GRACEFUL_HOOD_WYRM);
+		put(m, ItemID.GRACEFUL_CAPE_WYRM_WORN, ItemID.GRACEFUL_CAPE_WYRM);
+		put(m, ItemID.GRACEFUL_TOP_WYRM_WORN, ItemID.GRACEFUL_TOP_WYRM);
+		put(m, ItemID.GRACEFUL_LEGS_WYRM_WORN, ItemID.GRACEFUL_LEGS_WYRM);
+		put(m, ItemID.GRACEFUL_GLOVES_WYRM_WORN, ItemID.GRACEFUL_GLOVES_WYRM);
+		put(m, ItemID.GRACEFUL_BOOTS_WYRM_WORN, ItemID.GRACEFUL_BOOTS_WYRM);
+
+		put(m, ItemID.SKILLCAPE_MAX_WORN, ItemID.SKILLCAPE_MAX);
+
+		put(m, ItemID.HUNTING_LIGHT_CAPE_WORN, ItemID.HUNTING_LIGHT_CAPE);
+		put(m, ItemID.HUNTING_LIGHTER_CAPE_WORN, ItemID.HUNTING_LIGHTER_CAPE);
+
+		put(m, ItemID.SKILLCAPE_AGILITY_TRIMMED_WORN, ItemID.SKILLCAPE_AGILITY_TRIMMED);
+		put(m, ItemID.SKILLCAPE_AGILITY_WORN, ItemID.SKILLCAPE_AGILITY);
+
+		put(m, ItemID.HUNTING_CAMOFLAUGE_ROBE_WOOD_WORN, ItemID.HUNTING_CAMOFLAUGE_ROBE_WOOD);
+		put(m, ItemID.HUNTING_TROUSERS_WOOD_WORN, ItemID.HUNTING_TROUSERS_WOOD);
+		put(m, ItemID.HUNTING_CAMOFLAUGE_ROBE_JUNGLE_WORN, ItemID.HUNTING_CAMOFLAUGE_ROBE_JUNGLE);
+		put(m, ItemID.HUNTING_TROUSERS_JUNGLE_WORN, ItemID.HUNTING_TROUSERS_JUNGLE);
+		put(m, ItemID.HUNTING_CAMOFLAUGE_ROBE_DESERT_WORN, ItemID.HUNTING_CAMOFLAUGE_ROBE_DESERT);
+		put(m, ItemID.HUNTING_TROUSERS_DESERT_WORN, ItemID.HUNTING_TROUSERS_DESERT);
+		put(m, ItemID.HUNTING_CAMOFLAUGE_ROBE_POLAR_WORN, ItemID.HUNTING_CAMOFLAUGE_ROBE_POLAR);
+		put(m, ItemID.HUNTING_TROUSERS_POLAR_WORN, ItemID.HUNTING_TROUSERS_POLAR);
+
+		return Collections.unmodifiableMap(m);
+	}
+
+	private static void put(Map<Integer, Integer> m, int worn, int base)
+	{
+		Integer clash = m.put(worn, base);
+		if (clash != null && clash != base)
+		{
+			throw new IllegalStateException("duplicate worn id " + worn);
+		}
+	}
+
+	private WornItemIds()
+	{
+	}
+}
